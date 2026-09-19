@@ -1,5 +1,0 @@
-00001 001     0 Central Nervous System and Cranial Nerves, Bypass            Central Nervous System and Cranial Nerves, Bypass
-04887 02HA0QZ 1 Insertion of Implant Heart Assist into Heart, Open Approach  Insertion of Implantable Heart Assist System into Heart, Open Approach
-04888 02HA0RJ 1 Insert Ext Heart Assist in Heart, Intraop, Open              Insertion of Short-term External Heart Assist System into Heart, Intraoperative, Open Approach
-04889 02HA0RS 1 Insert of Bivent Ext Heart Assist into Heart, Open Approach  Insertion of Biventricular Short-term External Heart Assist System into Heart, Open Approach
-04890 02HA0RZ 1 Insertion of Ext Heart Assist into Heart, Open Approach      Insertion of Short-term External Heart Assist System into Heart, Open Approach

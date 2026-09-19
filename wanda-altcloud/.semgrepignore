@@ -1,3 +1,0 @@
-# CI configuration and design docs, not application logic.
-.github/
-strata-cloud/**/tests/

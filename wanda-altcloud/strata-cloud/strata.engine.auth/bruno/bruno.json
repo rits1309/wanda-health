@@ -1,9 +1,0 @@
-{
-  "version": "1",
-  "name": "strata.engine.auth (Cognito)",
-  "type": "collection",
-  "ignore": [
-    "node_modules",
-    ".git"
-  ]
-}

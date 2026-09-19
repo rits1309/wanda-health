@@ -1,7 +1,0 @@
-# Terraform state can contain sensitive values — never commit it.
-*.tfstate
-*.tfstate.*
-.terraform/
-.terraform.lock.hcl
-crash.log
-*.tfplan
