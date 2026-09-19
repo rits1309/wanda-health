@@ -1,0 +1,35 @@
+meta {
+  name: Register Device
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseUrl}}/v1/device-registrations
+  body: json
+  auth: none
+}
+
+headers {
+  X-API-Key: {{edgeSecret}}
+}
+
+body:json {
+  {
+    "user_id": "m-1",
+    "identifier_type": "SmartMeter Scale",
+    "external_id": "SM5000-IB-xxxx"
+  }
+}
+
+tests {
+  test("201 creates the active mapping ", function {
+    expect(res.getStatus()).to.equal(201);
+  });
+
+  test("mapping attributes this device to the member", function () {
+    const body = res.getBody();
+    expect(body.external_id).to.be.a("string").and.not.be.empty;
+    expect(body.registered_at).to.be.a("string").and.not.be.empty;
+  });
+}

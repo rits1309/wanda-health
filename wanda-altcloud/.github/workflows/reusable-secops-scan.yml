@@ -1,0 +1,690 @@
+name: Reusable - SecOps Scan
+
+# Called only (workflow_call). One gate for Semgrep, CodeQL, Trivy filesystem
+# scan and a Gitleaks backstop -- fails the caller when a finding crosses the
+# configured severity, before any image gets built. No IaC scanning here on
+# purpose: this pipeline scans strata-cloud/ application code only. Platform
+# IaC (Terraform) is owned entirely by the separate wanda-altcloud-infra-code
+# repo, with its own independent security scan/gate.
+#
+# Semgrep, CodeQL and Trivy-fs each run once per service via the caller's
+# `services` matrix, scoped to that service's own folder under
+# strata-cloud/ -- a new service opts in via ci.yml's detect-services job,
+# not a new file here. Gitleaks runs once, repo-wide: it's a backstop for
+# secrets that slipped past the local pre-commit hook (.pre-commit-config.yaml),
+# not a per-service concern.
+#
+# The four run_* toggles let ci.yml's workflow_dispatch inputs run this as
+# light as "just Semgrep" or as heavy as the full suite -- see ci.yml.
+
+on:
+  workflow_call:
+    inputs:
+      services:
+        description: "JSON array of service keys to scan"
+        required: true
+        type: string
+      run_full_devsecops_scan:
+        description: "Run Semgrep + CodeQL + Trivy-fs, all at once"
+        required: false
+        type: boolean
+        default: false
+      run_semgrep:
+        required: false
+        type: boolean
+        default: true
+      run_codeql:
+        required: false
+        type: boolean
+        default: false
+      run_trivy_fs:
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      semgrep_result:
+        description: "Semgrep job conclusion (success/failure/skipped)"
+        value: ${{ jobs.gate.outputs.semgrep }}
+      codeql_result:
+        description: "CodeQL job conclusion (success/failure/skipped)"
+        value: ${{ jobs.gate.outputs.codeql }}
+      trivy_fs_result:
+        description: "Trivy filesystem scan job conclusion (success/failure/skipped)"
+        value: ${{ jobs.gate.outputs.trivy_fs }}
+      gitleaks_result:
+        description: "Gitleaks backstop job conclusion (success/failure/skipped)"
+        value: ${{ jobs.gate.outputs.gitleaks }}
+      # This job's OWN outcome -- distinct from the four above, which are
+      # the individual scanner jobs (always success/skipped by design,
+      # since none of them fail on a finding). Added so the caller's PR
+      # comment can show a "SecOps Gate" row: without it, a run that
+      # failed here showed a checks table where every row was green,
+      # with nothing indicating this fail-fast check was what actually
+      # stopped the pipeline.
+      secops_gate_result:
+        description: "This gate job's own conclusion (success/failure) -- crash or severity breach, either one"
+        value: ${{ jobs.gate.outputs.gate_outcome }}
+
+# None of Semgrep/CodeQL/Trivy-fs fail their own INDIVIDUAL job on a
+# finding -- deliberately, so a genuine tool crash (a bad exit code, a
+# timeout, a database that failed to download) is never confused with
+# "this scanner found something." Instead every scanner uploads its
+# findings JSON and HTML report and exits clean; severity counting itself
+# happens in exactly one place, build_index.py, reused by both:
+#   - This file's own "SecOps Gate" job below: a fail-fast check against
+#     just Semgrep/CodeQL/Trivy-fs's findings (everything already scanned
+#     by this point), so a run that's already over a limit stops here
+#     instead of wasting the next several minutes on Build, Scan & Push.
+#   - reusable-notify.yml's "Enforce risk gate", the real safety net: the
+#     full aggregate across every tool including Trivy (image)/Grype/SBOM,
+#     which haven't run yet when this file's gate checks. A run can pass
+#     here and still fail there, if those later tools push a severity over
+#     its limit -- the reverse can never happen, since totals here can only
+#     grow, never shrink, once the rest of the pipeline's findings are
+#     added in. One threshold policy (SECURITY_THRESHOLD_* repo Variables),
+#     checked twice at two different points in the pipeline, not two
+#     separate policies. Gitleaks remains the one exception with its own
+#     stricter, count-independent policy: any leaked secret blocks
+#     immediately.
+env:
+  TRIVY_IGNORE_UNFIXED: "true"
+
+jobs:
+  resolve-toggles:
+    name: Resolve scan toggles
+    runs-on: ubuntu-latest
+    if: inputs.services != '[]'
+    outputs:
+      semgrep: ${{ steps.r.outputs.semgrep }}
+      codeql: ${{ steps.r.outputs.codeql }}
+      trivy_fs: ${{ steps.r.outputs.trivy_fs }}
+    steps:
+      - id: r
+        run: |
+          if [ "${{ inputs.run_full_devsecops_scan }}" = "true" ]; then
+            echo "semgrep=true" >> "$GITHUB_OUTPUT"
+            echo "codeql=true" >> "$GITHUB_OUTPUT"
+            echo "trivy_fs=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "semgrep=${{ inputs.run_semgrep }}" >> "$GITHUB_OUTPUT"
+            echo "codeql=${{ inputs.run_codeql }}" >> "$GITHUB_OUTPUT"
+            echo "trivy_fs=${{ inputs.run_trivy_fs }}" >> "$GITHUB_OUTPUT"
+          fi
+
+  semgrep:
+    name: Semgrep (${{ matrix.service }})
+    needs: resolve-toggles
+    if: needs.resolve-toggles.outputs.semgrep == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(inputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve service dir
+        id: meta
+        run: |
+          case "${{ matrix.service }}" in
+            booking)      DIR="strata.booking" ;;
+            connect)      DIR="strata.connect" ;;
+            engine-auth)  DIR="strata.engine.auth" ;;
+            terminology)  DIR="strata.terminology" ;;
+            engine)       DIR="strata.engine" ;;
+            *) echo "::error::Unknown service key '${{ matrix.service }}'"; exit 1 ;;
+          esac
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      - name: Run Semgrep
+        run: |
+          semgrep scan \
+            --config=auto \
+            --config=.devsecops/semgrep/rules \
+            --sarif \
+            --output=semgrep-${{ matrix.service }}.sarif \
+            strata-cloud/${{ steps.meta.outputs.dir }}
+
+      - name: Upload Semgrep report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-sarif-${{ matrix.service }}
+          path: semgrep-${{ matrix.service }}.sarif
+          if-no-files-found: warn
+
+      - name: Generate human-readable Semgrep report
+        if: always()
+        run: |
+          python3 .devsecops/report-template/normalize_sarif.py \
+            --tool Semgrep --out semgrep-findings.json semgrep-${{ matrix.service }}.sarif
+          python3 .devsecops/report-template/render_report.py \
+            --tool Semgrep --title "Semgrep Report - ${{ matrix.service }}" --data semgrep-findings.json \
+            --out semgrep-report-${{ matrix.service }}.html
+
+      # Same blocking severities as this tool's own row in build_index.py's
+      # TOOL_BLOCKING_SEVERITIES -- never a NEW decision, just this tool's
+      # existing pass/fail made visible as a real PR annotation (inline on
+      # the diff when file/line is known) without needing GitHub's Code
+      # Scanning SARIF upload (see the codeql job's `upload: never` for
+      # why that's deliberately not used here). Never fails this job on
+      # its own -- an ::error:: annotation is just log/diff formatting,
+      # not a non-zero exit.
+      - name: Annotate Semgrep findings
+        if: always()
+        run: |
+          python3 .devsecops/report-template/emit_annotations.py \
+            --tool Semgrep --data semgrep-findings.json \
+            --blocking-severities critical,high --service "${{ matrix.service }}"
+
+      - name: Upload Semgrep HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-html-report-${{ matrix.service }}
+          path: semgrep-report-${{ matrix.service }}.html
+          if-no-files-found: warn
+
+  codeql:
+    name: CodeQL (${{ matrix.service }})
+    needs: resolve-toggles
+    if: needs.resolve-toggles.outputs.codeql == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(inputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve service dir
+        id: meta
+        run: |
+          case "${{ matrix.service }}" in
+            booking)      DIR="strata.booking" ;;
+            connect)      DIR="strata.connect" ;;
+            engine-auth)  DIR="strata.engine.auth" ;;
+            terminology)  DIR="strata.terminology" ;;
+            engine)       DIR="strata.engine" ;;
+            *) echo "::error::Unknown service key '${{ matrix.service }}'"; exit 1 ;;
+          esac
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      # Scoped to this service's own folder via inline config -- keeps the
+      # per-service matrix meaningful instead of re-running a whole-repo scan
+      # once per service. `languages: python` is required, not optional --
+      # checkout pulls the whole repo, so auto-detect also picks up the
+      # .github/workflows/*.yml files as a second language ("actions"). With
+      # analysis scoped to one service's Python directory, that extractor
+      # finds zero files and `codeql database finalize` fails outright
+      # ("no source code seen"/JOB_STATUS_CONFIGURATION_ERROR) -- confirmed
+      # by a real run. Pinning the language avoids it ever being detected.
+      #
+      # paths-ignore excludes exactly one file: engine-auth's dev-only seed
+      # script prints its own fixed, publicly-documented, dev-pool-only
+      # password (already noqa'd for bandit's S105) so a developer running
+      # it locally knows what to sign in with -- CodeQL's
+      # py/clear-text-logging-sensitive-data still flagged that print by
+      # pattern alone. Inline suppression comments (lgtm[...]/codeql[...])
+      # don't work for this pipeline specifically -- confirmed by two real
+      # runs, neither changed the raw SARIF this same job reads directly,
+      # since that suppression only affects GitHub's own Code Scanning UI
+      # after an upload this job never does (upload: never, below). This
+      # excludes only that one file; every other file in this service still
+      # gets full analysis.
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: python
+          queries: security-and-quality
+          config: |
+            paths:
+              - strata-cloud/${{ steps.meta.outputs.dir }}
+            paths-ignore:
+              - strata-cloud/strata.engine.auth/scripts/seed.py
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v4
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          output: codeql-results-${{ matrix.service }}
+          upload: never
+
+      - name: Upload CodeQL report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-sarif-${{ matrix.service }}
+          path: codeql-results-${{ matrix.service }}/
+          if-no-files-found: warn
+
+      - name: Generate human-readable CodeQL report
+        if: always()
+        run: |
+          python3 .devsecops/report-template/normalize_sarif.py \
+            --tool CodeQL --out codeql-findings.json codeql-results-${{ matrix.service }}/*.sarif
+          python3 .devsecops/report-template/render_report.py \
+            --tool CodeQL --title "CodeQL Report - ${{ matrix.service }}" --data codeql-findings.json \
+            --out codeql-report-${{ matrix.service }}.html
+
+      # See Semgrep's identical "Annotate" step above for why this is a
+      # workflow-command annotation, not GitHub's Code Scanning SARIF
+      # upload (which this job deliberately leaves off, `upload: never`
+      # above).
+      - name: Annotate CodeQL findings
+        if: always()
+        run: |
+          python3 .devsecops/report-template/emit_annotations.py \
+            --tool CodeQL --data codeql-findings.json \
+            --blocking-severities critical,high --service "${{ matrix.service }}"
+
+      - name: Upload CodeQL HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeql-html-report-${{ matrix.service }}
+          path: codeql-report-${{ matrix.service }}.html
+          if-no-files-found: warn
+
+  trivy-fs:
+    name: Trivy Filesystem Scan (${{ matrix.service }})
+    needs: resolve-toggles
+    if: needs.resolve-toggles.outputs.trivy_fs == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(inputs.services) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve service dir
+        id: meta
+        run: |
+          case "${{ matrix.service }}" in
+            booking)      DIR="strata.booking" ;;
+            connect)      DIR="strata.connect" ;;
+            engine-auth)  DIR="strata.engine.auth" ;;
+            terminology)  DIR="strata.terminology" ;;
+            engine)       DIR="strata.engine" ;;
+            *) echo "::error::Unknown service key '${{ matrix.service }}'"; exit 1 ;;
+          esac
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+
+      # Scans the full severity range (was CRITICAL-only, back when only
+      # CRITICAL was worth surfacing loudly) -- the centralized security
+      # gate in reusable-notify.yml needs real HIGH/MEDIUM/LOW counts from
+      # every tool to sum against its own limits, not just CRITICAL.
+      # exit-code 0: this step never fails on its own; the aggregate gate
+      # is what decides pass/fail, after every scanner has finished.
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          # Two separate things had to be right here, and an earlier comment
+          # in this file got the diagnosis wrong, so the reasoning is spelled
+          # out rather than just the answer.
+          #
+          # 1. The input is `version`, NOT `trivy-version`. It was renamed
+          #    upstream, and an unrecognised input is only a warning, never
+          #    an error -- so `trivy-version` sat here looking correct while
+          #    doing nothing at all. Check the run's "Unexpected input(s)"
+          #    warning before assuming any pin here is being honoured.
+          #
+          # 2. The value must be a real tag. `latest` is rejected outright
+          #    ("unable to find 'latest' - use 'latest'", which is upstream's
+          #    own contradictory message). v0.74.0 IS a genuine release --
+          #    contrary to the claim in the comment this replaces, which
+          #    mistook a benign "Cache not found for input keys:
+          #    trivy-binary-v0.74.0-Linux-X64" cache miss for the failure.
+          #
+          # The actual failure was the binary download exiting 1 straight
+          # after "found version: 0.74.0", with no message, hitting a
+          # different service on each run -- an anonymous GitHub API rate
+          # limit, not a bad version. Hence the token below: authenticated
+          # API calls get a far higher limit. Pinning the tag as well keeps
+          # the download deterministic and cacheable.
+          version: v0.74.0
+          token-setup-trivy: ${{ secrets.GITHUB_TOKEN }}
+          scan-type: fs
+          scan-ref: strata-cloud/${{ steps.meta.outputs.dir }}
+          severity: "CRITICAL,HIGH,MEDIUM,LOW"
+          ignore-unfixed: ${{ env.TRIVY_IGNORE_UNFIXED }}
+          exit-code: "0"
+          format: sarif
+          output: trivy-fs-${{ matrix.service }}.sarif
+
+      - name: Upload Trivy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-sarif-${{ matrix.service }}
+          path: trivy-fs-${{ matrix.service }}.sarif
+          if-no-files-found: warn
+
+      - name: Generate human-readable Trivy report
+        if: always()
+        run: |
+          python3 .devsecops/report-template/normalize_sarif.py \
+            --tool "Trivy (filesystem)" --out trivyfs-findings.json trivy-fs-${{ matrix.service }}.sarif
+          python3 .devsecops/report-template/render_report.py \
+            --tool "Trivy (filesystem)" --title "Trivy Filesystem Report - ${{ matrix.service }}" --data trivyfs-findings.json \
+            --out trivy-fs-report-${{ matrix.service }}.html
+
+      # ignore-unfixed above already means every finding here has a fix
+      # available -- see Semgrep's identical "Annotate" step above for
+      # why this is a workflow-command annotation, not a SARIF upload.
+      - name: Annotate Trivy filesystem findings
+        if: always()
+        run: |
+          python3 .devsecops/report-template/emit_annotations.py \
+            --tool "Trivy (filesystem)" --data trivyfs-findings.json \
+            --blocking-severities critical,high --service "${{ matrix.service }}"
+
+      - name: Upload Trivy HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-html-report-${{ matrix.service }}
+          path: trivy-fs-report-${{ matrix.service }}.html
+          if-no-files-found: warn
+
+  gitleaks-backstop:
+    name: Gitleaks (backstop)
+    runs-on: ubuntu-latest
+    # gitleaks/gitleaks-action@v2 now requires a paid GITLEAKS_LICENSE secret
+    # (confirmed by a real run: "missing gitleaks license" failure) -- that's
+    # a paywall on their wrapper Action specifically, not on the open-source
+    # gitleaks CLI itself, so this runs the CLI directly via its official
+    # container image instead, same tool the local pre-commit hook uses.
+    #
+    # Deliberately no `needs:` -- it never reads resolve-toggles' outputs, and
+    # a `needs:` on a job that can itself be skipped (resolve-toggles skips
+    # when services == '[]') silently skips this one too. Confirmed by a real
+    # run on a commit that only touched .github/workflows/**: Gitleaks never
+    # ran at all. This is a secret scanner; it must run on every commit
+    # regardless of which service paths changed -- secrets aren't scoped to
+    # "changed services."
+    container:
+      image: zricethezav/gitleaks:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # actions/checkout's own safe.directory fix is scoped to its own step
+      # (it points GIT_CONFIG_GLOBAL at a temp file for that step's process
+      # only, not a persistent global config) -- it does not carry over to
+      # this job's container for a later step's own `git` invocation.
+      # Confirmed by a real run: gitleaks detect logged
+      # "fatal: detected dubious ownership in repository at
+      # '/__w/wanda-altcloud/wanda-altcloud'" and silently reported
+      # "0 commits scanned" / "no leaks found" -- on a commit that planted a
+      # real, verified-detectable secret. The backstop has been scanning
+      # nothing on every real run until this fix.
+      - name: Mark workspace as a safe git directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Report generation split from the pass/fail decision -- exit-code 1
+      # would otherwise stop the job right here with no SARIF ever written,
+      # leaving the PR report with nothing to show for a Gitleaks failure
+      # (every other scanner here uploads its report before its own
+      # separate fail step, same reasoning).
+      - name: Gitleaks scan
+        id: scan
+        run: |
+          set +e
+          gitleaks detect --source . --config .gitleaks.toml \
+            --report-format sarif --report-path gitleaks.sarif --redact
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Gitleaks report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-sarif
+          path: gitleaks.sarif
+          if-no-files-found: warn
+
+      - name: Fail if leaks found
+        if: steps.scan.outputs.exit_code != '0'
+        run: |
+          echo "::error::Gitleaks found leaked secret(s) -- see the gitleaks-sarif artifact."
+          exit 1
+
+      - name: Annotate clean Gitleaks run
+        if: steps.scan.outputs.exit_code == '0'
+        run: |
+          echo "::notice::Gitleaks: PASS -- no leaked secrets found"
+
+  # Separate job, not two more steps tacked onto gitleaks-backstop -- that
+  # job's `container: zricethezav/gitleaks:latest` has no python3 (confirmed
+  # by a real run: exit code 127), and a job-level `container:` applies to
+  # every step in the job, so there's no way to run just the report step
+  # outside it from within the same job. Gitleaks is the one hard-blocking
+  # check in this pipeline; it had no HTML report at all until now (SARIF
+  # only), so a reviewer had nowhere to click through to see exactly which
+  # file/line leaked. continue-on-error: true at the job level so a report-
+  # generation hiccup here (e.g. a flaky artifact download) can never fail
+  # this whole reusable workflow's result and wrongly block ci.yml's
+  # build-scan-push, which gates on `needs.secops-scan.result != 'failure'`
+  # -- report generation must stay strictly downstream of the pass/fail
+  # decision gitleaks-backstop already made.
+  gitleaks-report:
+    name: Gitleaks Report
+    needs: gitleaks-backstop
+    if: always()
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Gitleaks SARIF
+        uses: actions/download-artifact@v4
+        with:
+          name: gitleaks-sarif
+
+      - name: Generate human-readable Gitleaks report
+        run: |
+          python3 .devsecops/report-template/normalize_sarif.py \
+            --tool Gitleaks --out gitleaks-findings.json gitleaks.sarif
+          python3 .devsecops/report-template/render_report.py \
+            --tool Gitleaks --title "Gitleaks Report" --data gitleaks-findings.json \
+            --out gitleaks-report.html
+
+      - name: Upload Gitleaks HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-html-report
+          path: gitleaks-report.html
+          if-no-files-found: warn
+
+  # Two independent reasons this job can fail: (1) Gitleaks or a genuine
+  # tool crash in one of the others -- a real execution failure, not a
+  # finding -- checked by "Evaluate gate" below; (2) Semgrep/CodeQL/
+  # Trivy-fs's own findings, summed across every service scanned so far,
+  # already breaching a SECURITY_THRESHOLD_* limit -- checked by "Enforce
+  # SecOps stage gate" below. Either failure stops ci.yml's build-scan-push
+  # from ever running (it checks needs.secops-scan.result != 'failure',
+  # and this job's own result is this whole reusable workflow's result).
+  gate:
+    name: SecOps Gate
+    needs: [resolve-toggles, semgrep, codeql, trivy-fs, gitleaks-backstop]
+    if: always() && inputs.services != '[]'
+    runs-on: ubuntu-latest
+    outputs:
+      semgrep: ${{ needs.semgrep.result }}
+      codeql: ${{ needs.codeql.result }}
+      trivy_fs: ${{ needs.trivy-fs.result }}
+      gitleaks: ${{ needs.gitleaks-backstop.result }}
+      gate_outcome: ${{ steps.summarize.outputs.gate_outcome }}
+    steps:
+      - name: Evaluate gate
+        id: evaluate_gate
+        run: |
+          fail=0
+
+          check() {
+            local name="$1" result="$2"
+            if [ "$result" = "success" ] || [ "$result" = "skipped" ]; then
+              echo "$name: $result"
+            else
+              echo "::error::$name: $result"
+              fail=1
+            fi
+          }
+
+          check "Semgrep"    "${{ needs.semgrep.result }}"
+          check "CodeQL"     "${{ needs.codeql.result }}"
+          check "Trivy-fs"   "${{ needs.trivy-fs.result }}"
+          check "Gitleaks"   "${{ needs.gitleaks-backstop.result }}"
+
+          if [ "$fail" -eq 1 ]; then
+            echo "::error::One or more SecOps checks failed -- see the failing job(s) above for SARIF/HTML artifacts."
+            exit 1
+          fi
+
+      # if: always() from here down -- this severity check must still run
+      # (and be able to fail the job on its own) even when the crash check
+      # above already failed, so a developer sees the severity picture too,
+      # not just "something crashed."
+      - uses: actions/checkout@v4
+        if: always()
+
+      # Grabs every artifact uploaded so far in this run -- at this point
+      # in the pipeline that's exactly Semgrep/CodeQL/Trivy-fs/Gitleaks's
+      # SARIF+HTML reports, since Build, Scan & Push (Trivy image, Grype,
+      # SBOM) hasn't started yet. Same actions/download-artifact call
+      # reusable-notify.yml's own "Download all report artifacts" step
+      # uses, just naturally scoped earlier by timing rather than a
+      # pattern filter.
+      - name: Download reports produced so far
+        if: always()
+        uses: actions/download-artifact@v4
+        with:
+          path: reports
+
+      # Reuses build_index.py -- the exact same aggregation logic and
+      # SECURITY_THRESHOLD_* thresholds as reusable-notify.yml's real
+      # gate, just run early against a partial set of reports. --out points
+      # at a throwaway path: this job only wants the --counts-output JSON,
+      # not a report page (reusable-notify.yml still builds and publishes
+      # the real one later, over the complete set of reports).
+      - name: Compute partial severity counts
+        if: always()
+        env:
+          SECURITY_THRESHOLD_CRITICAL: ${{ vars.SECURITY_THRESHOLD_CRITICAL }}
+          SECURITY_THRESHOLD_HIGH: ${{ vars.SECURITY_THRESHOLD_HIGH }}
+          SECURITY_THRESHOLD_MEDIUM: ${{ vars.SECURITY_THRESHOLD_MEDIUM }}
+          SECURITY_THRESHOLD_LOW: ${{ vars.SECURITY_THRESHOLD_LOW }}
+        run: |
+          python3 .devsecops/report-template/build_index.py \
+            --reports-dir reports \
+            --run-id "${{ github.run_id }}" \
+            --ref-name "${{ github.ref_name }}" \
+            --sha "${{ github.sha }}" \
+            --generated-at "$(date -u +'%Y-%m-%d %H:%M UTC')" \
+            --out /tmp/secops-partial-index.html \
+            --risk-output /tmp/.secops-risk-level \
+            --counts-output /tmp/.secops-risk-counts.json \
+            ${SECURITY_THRESHOLD_CRITICAL:+--critical-threshold "$SECURITY_THRESHOLD_CRITICAL"} \
+            ${SECURITY_THRESHOLD_HIGH:+--high-threshold "$SECURITY_THRESHOLD_HIGH"} \
+            ${SECURITY_THRESHOLD_MEDIUM:+--medium-threshold "$SECURITY_THRESHOLD_MEDIUM"} \
+            ${SECURITY_THRESHOLD_LOW:+--low-threshold "$SECURITY_THRESHOLD_LOW"}
+
+      # A breach detected here can only get worse once Trivy (image)/Grype/
+      # SBOM's findings are added in later, never better -- so failing now
+      # is always a correct early catch, never a false positive. It just
+      # means a run that was always going to fail does so before spending
+      # several minutes building, scanning, signing and pushing images
+      # nothing downstream will ever deploy.
+      - name: Enforce SecOps stage gate
+        id: severity_gate
+        if: always()
+        run: |
+          risk="$(cat /tmp/.secops-risk-level 2>/dev/null || echo NONE)"
+          echo "Computed risk level from Semgrep/CodeQL/Trivy-fs so far: $risk"
+
+          # Same three-table render as reusable-notify.yml's "Enforce risk
+          # gate" (severity totals, by tool/service, individual findings)
+          # so a run that fails here is just as traceable to a specific
+          # service/tool/rule as one that makes it all the way to the
+          # final gate -- see that step's own comment for why each table
+          # exists.
+          if [ -f /tmp/.secops-risk-counts.json ]; then
+            report_md="$(jq -r '
+              def sevtable:
+                ["| Severity | Found | Allowed | Status |", "|---|---|---|---|"]
+                + [ .severities[]
+                    | "| " + .severity + " | " + (.found|tostring) + " | "
+                      + (.allowed|tostring) + " | "
+                      + (if .breach then "BREACH" else "OK" end) + " |" ];
+              def sourcetable:
+                if (.by_source|length) == 0 then ["_No findings from Semgrep/CodeQL/Trivy-fs so far._"]
+                else
+                  ["| Tool | Service | Critical | High | Medium | Low |", "|---|---|---|---|---|---|"]
+                  + [ .by_source[]
+                      | "| " + .tool + " | " + .service + " | " + (.critical|tostring) + " | "
+                        + (.high|tostring) + " | " + (.medium|tostring) + " | " + (.low|tostring) + " |" ]
+                end;
+              def findingstable:
+                if (.findings|length) == 0 then ["_No individual findings to show._"]
+                else
+                  ["| Severity | Tool | Service | Rule | Location | Message |", "|---|---|---|---|---|---|"]
+                  + [ .findings[]
+                      | "| " + .severity + " | " + .tool + " | " + .service + " | `" + .rule
+                        + "` | `" + .location + "` | " + .message + " |" ]
+                  + (if .findings_omitted > 0
+                     then ["", "_" + (.findings_omitted|tostring) + " more finding(s) not shown -- see the full report bundle._"]
+                     else [] end)
+                end;
+              (["#### Severity totals", ""] + sevtable
+               + ["", "#### By tool / service", ""] + sourcetable
+               + ["", "#### Individual findings", ""] + findingstable)
+              | .[]
+            ' /tmp/.secops-risk-counts.json)"
+          else
+            report_md="(no counts computed -- see the step above)"
+          fi
+          echo "$report_md"
+          {
+            echo "### SecOps Scan severity gate"
+            echo "_Semgrep/CodeQL/Trivy-fs only -- Trivy (image), Grype and the SBOM run later in Build, Scan & Push and are checked by the full gate at the end of the pipeline._"
+            echo
+            echo "$report_md"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # build_index.py's risk_level can now only ever be
+          # NONE/MINIMAL/CRITICAL/HIGH -- medium/low no longer feed the
+          # breach decision at all (see that script's own comment).
+          case "$risk" in
+            CRITICAL|HIGH)
+              echo "::error::SecOps Scan already breached the $risk limit -- see the table above. Stopping here before Build, Scan & Push runs; findings from Trivy (image)/Grype/SBOM aren't included yet."
+              exit 1
+              ;;
+          esac
+
+      # Surfaces this job's own pass/fail as a job-level output
+      # (gate_outcome, exposed to the caller as secops_gate_result) --
+      # neither prior step can set this itself: each would have to run
+      # `if: always()` just to record its own failure past its own exit 1,
+      # and a failure in either one (a genuine crash in "Evaluate gate", a
+      # severity breach in "Enforce SecOps stage gate") means this job
+      # failed, full stop. if: always() here so this always runs and
+      # always reports accurately, regardless of which earlier step (if
+      # any) failed.
+      - name: Record gate outcome
+        id: summarize
+        if: always()
+        run: |
+          if [ "${{ steps.evaluate_gate.outcome }}" = "failure" ] || [ "${{ steps.severity_gate.outcome }}" = "failure" ]; then
+            echo "gate_outcome=failure" >> "$GITHUB_OUTPUT"
+          else
+            echo "gate_outcome=success" >> "$GITHUB_OUTPUT"
+          fi

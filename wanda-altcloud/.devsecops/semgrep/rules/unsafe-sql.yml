@@ -1,0 +1,17 @@
+rules:
+  - id: dynamic-sql-string-building
+    languages: [python]
+    severity: ERROR
+    message: >
+      SQL query built via an f-string or string concatenation instead of a
+      parameterized query. This risks SQL injection -- use
+      cursor.execute(query, params) with placeholders instead of formatting
+      values directly into the query string.
+    metadata:
+      category: security
+      cwe: "CWE-89: SQL Injection"
+      owasp: "A03:2021 - Injection"
+    patterns:
+      - pattern-either:
+          - pattern: $CUR.execute(f"...")
+          - pattern: $CUR.execute("..." + $X)

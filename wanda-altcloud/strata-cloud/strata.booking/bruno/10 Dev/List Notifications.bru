@@ -1,0 +1,44 @@
+meta {
+  name: List Notifications
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/v1/dev/notifications?limit=50
+  auth: none
+}
+
+script:post-response {
+  const items = res.getBody();
+  if (Array.isArray(items)) {
+    const requested = items.find(
+      (i) => i.notification_type === "reschedule_requested" && i.payload && i.payload.link
+    );
+    if (requested) {
+      const token = String(requested.payload.link).split("token=")[1];
+      if (token) bru.setEnvVar("rescheduleToken", token);
+    }
+    const suggested = items.find(
+      (i) =>
+        i.notification_type === "appointment_alternatives_suggested" &&
+        i.payload &&
+        Array.isArray(i.payload.alternatives) &&
+        i.payload.alternatives.length
+    );
+    if (suggested) {
+      const token = String(suggested.payload.alternatives[0].link).split("token=")[1];
+      if (token) bru.setEnvVar("alternativeToken", token);
+    }
+  }
+}
+
+tests {
+  test("returns 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  The stub notification store (LocalStoreSender) — how emails are demonstrated in Phase 1. The post-script extracts {{rescheduleToken}} and {{alternativeToken}} from the newest matching notifications.
+}

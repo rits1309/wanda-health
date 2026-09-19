@@ -1,0 +1,13 @@
+# Local environments and tooling caches — never committed.
+.venv/
+.env
+__pycache__/
+*.pyc
+*.egg-info/
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.DS_Store
+*.tfvars

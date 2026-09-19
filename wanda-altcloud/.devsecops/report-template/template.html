@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+  :root {
+    --bg:#F6F7FA; --surface:#FFFFFF; --surface-2:#EEF0F5; --ink:#161A23; --ink-muted:#5B6270; --ink-faint:#8890A0;
+    --border:#DFE2EA; --accent:#4C4FE0; --accent-soft:#EAEAFC;
+    --crit:#C4362E; --crit-soft:#FBEAEA;
+    --high:#B8560B; --high-soft:#FBF0E6;
+    --med:#9A7B0A;  --med-soft:#FBF6E2;
+    --low:#2F6FB0;  --low-soft:#EAF2FA;
+    --info:#5B6270; --info-soft:#EEF0F5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#0F121A; --surface:#161A25; --surface-2:#1D2230; --ink:#E8EAF1; --ink-muted:#9BA2B4; --ink-faint:#6C7386;
+      --border:#2A3040; --accent:#8D90FF; --accent-soft:#22243D;
+      --crit:#FF6E64; --crit-soft:#3A1913;
+      --high:#FFB25C; --high-soft:#3A2712;
+      --med:#E8C34D;  --med-soft:#332D10;
+      --low:#7FB0E8;  --low-soft:#132436;
+      --info:#9BA2B4; --info-soft:#1D2230;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#0F121A; --surface:#161A25; --surface-2:#1D2230; --ink:#E8EAF1; --ink-muted:#9BA2B4; --ink-faint:#6C7386;
+    --border:#2A3040; --accent:#8D90FF; --accent-soft:#22243D;
+    --crit:#FF6E64; --crit-soft:#3A1913;
+    --high:#FFB25C; --high-soft:#3A2712;
+    --med:#E8C34D;  --med-soft:#332D10;
+    --low:#7FB0E8;  --low-soft:#132436;
+    --info:#9BA2B4; --info-soft:#1D2230;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: "IBM Plex Sans", -apple-system, Segoe UI, sans-serif; line-height: 1.5;
+  }
+  .mono { font-family: "IBM Plex Mono", Consolas, monospace; }
+  a { color: var(--accent); }
+  .wrap { max-width: 1320px; margin: 0 auto; padding: 28px 24px 48px; }
+
+  header { margin-bottom: 20px; }
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace; font-size: 11.5px; letter-spacing: .07em; text-transform: uppercase;
+    color: var(--ink-faint); margin-bottom: 6px;
+  }
+  .title-row { display: flex; align-items: center; gap: 12px; }
+  .tool-icon {
+    width: 34px; height: 34px; flex: none; display: flex; align-items: center; justify-content: center;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 9px; overflow: hidden; padding: 5px;
+  }
+  .tool-icon:empty { display: none; }
+  .tool-icon svg, .tool-icon img { width: 100%; height: 100%; object-fit: contain; }
+  h1 { font-size: 1.5rem; margin: 0; text-wrap: balance; }
+  .meta { font-size: 13px; color: var(--ink-muted); }
+  .meta b { color: var(--ink); font-weight: 500; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 20px 0 24px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px;
+    display: flex; align-items: center; gap: 12px; cursor: pointer; text-align: left; font: inherit; color: inherit;
+    transition: border-color .15s ease;
+  }
+  .card:hover { border-color: var(--card-color, var(--accent)); }
+  .card.active { border-color: var(--card-color, var(--accent)); box-shadow: 0 0 0 1px var(--card-color, var(--accent)) inset; }
+  .card-bar { width: 5px; align-self: stretch; border-radius: 3px; background: var(--card-color, var(--ink-faint)); flex: none; }
+  .card-label { font-size: 12px; color: var(--ink-muted); text-transform: capitalize; }
+  .card-count { font-family: "IBM Plex Mono", monospace; font-size: 22px; font-weight: 600; line-height: 1.1; }
+
+  .panes {
+    display: grid; grid-template-columns: minmax(280px, 380px) 1fr; gap: 16px; align-items: start;
+  }
+  @media (max-width: 860px) { .panes { grid-template-columns: 1fr; } }
+
+  .list-panel, .detail-panel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden;
+  }
+  .panel-head {
+    padding: 12px 14px; border-bottom: 1px solid var(--border); background: var(--surface-2);
+    display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; color: var(--ink-muted);
+  }
+  .panel-head b { color: var(--ink); font-weight: 600; }
+  .search {
+    width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg);
+    color: var(--ink); font: inherit; font-size: 13px;
+  }
+  .search:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .search-wrap { padding: 12px 14px; border-bottom: 1px solid var(--border); }
+
+  .list { max-height: 62vh; overflow-y: auto; }
+  .row {
+    width: 100%; text-align: left; font: inherit; color: inherit; background: none; border: 0;
+    padding: 11px 14px; display: flex; flex-direction: column; gap: 5px; cursor: pointer;
+    border-bottom: 1px solid var(--border);
+  }
+  .row:last-child { border-bottom: none; }
+  .row:hover { background: var(--surface-2); }
+  .row.active { background: var(--accent-soft); }
+  .row-top { display: flex; align-items: center; gap: 8px; }
+  .row-title { font-size: 13.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row-sub { font-size: 11.5px; color: var(--ink-faint); }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 999px;
+    font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; white-space: nowrap; flex: none;
+    background: var(--pill-soft, var(--info-soft)); color: var(--pill-color, var(--info));
+  }
+
+  .detail-panel { padding: 0; }
+  .detail-body { padding: 20px 22px 26px; }
+  .detail-empty { padding: 40px 22px; text-align: center; color: var(--ink-faint); font-size: 14px; }
+  .detail-title { font-size: 1.15rem; margin: 10px 0 4px; text-wrap: balance; }
+  .detail-badges { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .score { font-family: "IBM Plex Mono", monospace; font-size: 11.5px; color: var(--ink-muted); }
+  .detail-loc {
+    margin-top: 12px; font-size: 12.5px; color: var(--ink-muted); font-family: "IBM Plex Mono", monospace;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px;
+    overflow-x: auto; white-space: nowrap;
+  }
+  .detail-message { margin-top: 16px; font-size: 14px; color: var(--ink); white-space: pre-wrap; }
+  .detail-section-label {
+    font-family: "IBM Plex Mono", monospace; font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--ink-faint); margin: 20px 0 8px;
+  }
+  .detail-remediation {
+    font-size: 13.5px; color: var(--ink-muted); white-space: pre-wrap; line-height: 1.6;
+    max-height: 340px; overflow-y: auto; padding-right: 4px;
+  }
+  .detail-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+  .tag {
+    font-size: 11px; padding: 2px 8px; border-radius: 6px; background: var(--surface-2); color: var(--ink-muted);
+    border: 1px solid var(--border);
+  }
+  .detail-link { margin-top: 16px; font-size: 13px; }
+
+  footer { margin-top: 28px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 12px; color: var(--ink-faint); }
+
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">DevSecOps Pipeline &middot; Security Test Report</div>
+    <div class="title-row">
+      <div class="tool-icon">__TOOL_ICON__</div>
+      <h1 id="tool-title">Report</h1>
+    </div>
+    <div class="meta" id="tool-meta"></div>
+  </header>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="panes">
+    <div class="list-panel">
+      <div class="panel-head"><b id="list-heading">Findings</b> <span id="list-count"></span></div>
+      <div class="search-wrap">
+        <input class="search" id="search" type="search" placeholder="Search title, rule ID, file...">
+      </div>
+      <div class="list" id="list"></div>
+    </div>
+    <div class="detail-panel">
+      <div class="panel-head"><b>Details</b></div>
+      <div id="detail"></div>
+    </div>
+  </div>
+
+  <footer id="footer-note"></footer>
+</div>
+
+<script id="findings-data" type="application/json">__FINDINGS_JSON__</script>
+<script>
+(function () {
+  const data = JSON.parse(document.getElementById("findings-data").textContent);
+  const isInventory = data.kind === "inventory";
+
+  const SEV_ORDER = isInventory
+    ? ["operating-system", "application", "library", "unknown"]
+    : ["critical", "high", "medium", "low", "info"];
+  const SEV_LABEL = isInventory
+    ? { "operating-system": "OS packages", application: "Application", library: "Libraries", unknown: "Other" }
+    : { critical: "Critical", high: "High", medium: "Medium", low: "Low", info: "Info" };
+  const SEV_VAR = isInventory
+    ? { "operating-system": "accent", application: "high", library: "low", unknown: "info" }
+    : { critical: "crit", high: "high", medium: "med", low: "low", info: "info" };
+
+  document.title = data.tool + " Report";
+  document.getElementById("tool-title").textContent = data.tool;
+  document.getElementById("tool-meta").innerHTML =
+    "<b>Generated</b> " + escapeHtml(data.generatedAt) +
+    (isInventory ? "" : " &middot; <b>Total</b> " + data.findings.length);
+  document.getElementById("list-heading").textContent = isInventory ? "Components" : (data.tool + " Findings");
+  document.getElementById("footer-note").textContent = isInventory
+    ? "Raw CycloneDX JSON for this SBOM is attached to the same workflow run as a separate artifact."
+    : "Raw SARIF for this scan is attached to the same workflow run as a separate artifact.";
+
+  function escapeHtml(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
+  // --- summary cards ---
+  const cardsEl = document.getElementById("cards");
+  let activeFilter = null;
+
+  function renderCards() {
+    cardsEl.innerHTML = "";
+    SEV_ORDER.forEach((key) => {
+      const count = data.summary[key] || 0;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "card" + (activeFilter === key ? " active" : "");
+      btn.style.setProperty("--card-color", "var(--" + SEV_VAR[key] + ")");
+      btn.innerHTML =
+        '<span class="card-bar"></span><span><span class="card-label">' +
+        escapeHtml(SEV_LABEL[key]) + '</span><br><span class="card-count">' + count + "</span></span>";
+      btn.addEventListener("click", () => {
+        activeFilter = activeFilter === key ? null : key;
+        renderCards();
+        renderList();
+      });
+      cardsEl.appendChild(btn);
+    });
+  }
+
+  // --- list + detail ---
+  const listEl = document.getElementById("list");
+  const searchEl = document.getElementById("search");
+  const detailEl = document.getElementById("detail");
+  const listCountEl = document.getElementById("list-count");
+  let selectedIndex = -1;
+  let visibleItems = [];
+
+  function matchesSearch(item, q) {
+    if (!q) return true;
+    q = q.toLowerCase();
+    return (item.title || "").toLowerCase().includes(q) ||
+           (item.ruleId || "").toLowerCase().includes(q) ||
+           (item.file || "").toLowerCase().includes(q);
+  }
+
+  function renderList() {
+    const q = searchEl.value.trim();
+    visibleItems = data.findings.filter((it) =>
+      (!activeFilter || it.severity === activeFilter) && matchesSearch(it, q)
+    );
+    listCountEl.textContent = visibleItems.length + " shown";
+
+    if (visibleItems.length === 0) {
+      listEl.innerHTML = '<div class="detail-empty">No matching ' + (isInventory ? "components" : "findings") + ".</div>";
+      renderDetail(null);
+      return;
+    }
+
+    listEl.innerHTML = "";
+    visibleItems.forEach((item, i) => {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "row" + (i === selectedIndex ? " active" : "");
+      const sevVar = SEV_VAR[item.severity] || "info";
+      row.innerHTML =
+        '<span class="row-top"><span class="pill" style="--pill-color:var(--' + sevVar +
+        ');--pill-soft:var(--' + sevVar + '-soft)">' + escapeHtml(SEV_LABEL[item.severity] || item.severity) +
+        '</span><span class="row-title">' + escapeHtml(item.title) + "</span></span>" +
+        '<span class="row-sub mono">' + escapeHtml(item.ruleId || "") + "</span>";
+      row.addEventListener("click", () => {
+        selectedIndex = i;
+        renderList();
+      });
+      listEl.appendChild(row);
+    });
+
+    if (selectedIndex < 0 || selectedIndex >= visibleItems.length) selectedIndex = 0;
+    renderDetail(visibleItems[selectedIndex]);
+  }
+
+  function renderDetail(item) {
+    if (!item) {
+      detailEl.innerHTML = '<div class="detail-empty">Nothing selected.</div>';
+      return;
+    }
+    const sevVar = SEV_VAR[item.severity] || "info";
+    let html = '<div class="detail-body">';
+    html += '<div class="detail-badges"><span class="pill" style="--pill-color:var(--' + sevVar +
+      ');--pill-soft:var(--' + sevVar + '-soft)">' + escapeHtml(SEV_LABEL[item.severity] || item.severity) + "</span>";
+    if (item.score != null) html += '<span class="score">CVSS ' + item.score.toFixed(1) + "</span>";
+    html += "</div>";
+    html += '<h2 class="detail-title">' + escapeHtml(item.title) + "</h2>";
+    if (item.ruleId) html += '<div class="row-sub mono">' + escapeHtml(item.ruleId) + "</div>";
+    if (item.file) {
+      html += '<div class="detail-loc">' + escapeHtml(item.file) + (item.line ? ":" + item.line : "") + "</div>";
+    }
+    if (item.message) html += '<div class="detail-message">' + escapeHtml(item.message) + "</div>";
+    if (item.remediation) {
+      html += '<div class="detail-section-label">' + (isInventory ? "Component details" : "Remediation") + "</div>";
+      html += '<div class="detail-remediation">' + escapeHtml(item.remediation) + "</div>";
+    }
+    if (item.tags && item.tags.length) {
+      html += '<div class="detail-tags">' + item.tags.map((t) => '<span class="tag">' + escapeHtml(t) + "</span>").join("") + "</div>";
+    }
+    if (item.helpUri) {
+      html += '<div class="detail-link"><a href="' + encodeURI(item.helpUri) + '" target="_blank" rel="noopener">Reference &rarr;</a></div>';
+    }
+    html += "</div>";
+    detailEl.innerHTML = html;
+  }
+
+  searchEl.addEventListener("input", () => { selectedIndex = -1; renderList(); });
+
+  renderCards();
+  renderList();
+})();
+</script>
+</body>
+</html>

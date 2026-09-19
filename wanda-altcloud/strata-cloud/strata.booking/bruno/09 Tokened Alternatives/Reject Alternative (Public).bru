@@ -1,0 +1,27 @@
+meta {
+  name: Reject Alternative (Public)
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/v1/alternatives/reject
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "token": "{{alternativeToken}}"
+  }
+}
+
+tests {
+  test("204 records the rejection", function () {
+    expect([204, 404]).to.include(res.getStatus());
+  });
+}
+
+docs {
+  Reject records the decision and books nothing; the booking-page link in the email always remains usable. (404 here if the token was already accepted.)
+}

@@ -1,0 +1,23 @@
+meta {
+  name: Ingest Rejected Without Key
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/v1/readings
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "reading_type": "weight"
+  }
+}
+
+tests {
+  test("401 without the shared edge secret ", function {
+    expect(res.getStatus()).to.equal(401);
+  });
+}

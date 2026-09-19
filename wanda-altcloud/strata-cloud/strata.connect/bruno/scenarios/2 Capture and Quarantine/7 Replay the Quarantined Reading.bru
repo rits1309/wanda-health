@@ -1,0 +1,34 @@
+meta {
+  name: 7 Replay the Quarantined Reading
+  type: http
+  seq: 7
+}
+
+post {
+  url: {{baseUrl}}/v1/dev/replay
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "correlation_id": "{{scn2Correlation}}"
+  }
+}
+
+tests {
+  test("202 — re-enqueued under the ORIGINAL correlation id ", function {
+    expect(res.getStatus()).to.equal(202);
+    expect(res.getBody().correlation_id).to.equal(bru.getVar("scn2Correlation"));
+  });
+
+  test("the receipt shows the history the replay joins: one done entry (the quarantine ack)", function () {
+    expect(res.getBody().prior_entries).to.eql({ done: 1 });
+  });
+}
+
+docs {
+  The mirror of `inv replay --correlation-id <id>`. Replay re-enqueues from the raw
+  store — the payload captured at request 2, byte-for-byte the provider's values —
+  so the outcome is identical to first-time processing.
+}

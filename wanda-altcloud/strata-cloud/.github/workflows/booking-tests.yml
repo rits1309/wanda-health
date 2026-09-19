@@ -1,0 +1,78 @@
+name: Booking · Tests
+
+# strata.booking is one subproject in this multi-service repo; scope CI to it by path
+# so unrelated changes (strata.engine, strata.engine.auth) don't trigger this run.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "strata.booking/**"
+      - "strata.core/**"
+      - "strata.identity/**"
+      - ".github/workflows/booking-tests.yml"
+  pull_request:
+    paths:
+      - "strata.booking/**"
+      - "strata.core/**"
+      - "strata.identity/**"
+      - ".github/workflows/booking-tests.yml"
+
+jobs:
+  pytest:
+    name: pytest (unit + api + contract)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The service lives in the strata.booking/ subfolder; run every step from there.
+    defaults:
+      run:
+        working-directory: strata.booking
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: |
+            strata.booking/pyproject.toml
+            strata.identity/pyproject.toml
+
+      # strata-identity/strata-core are local path dependencies (see pyproject.toml);
+      # the editable installs resolve them from the sibling folders.
+      - name: Install dependencies
+        run: pip install -e ../strata.identity -e ../strata.core -e ".[dev]"
+
+      # The suite spins up Postgres via testcontainers (Docker is preinstalled on the runner).
+      # Pre-pull so the first test doesn't pay the download inside its timeout.
+      - name: Pull Postgres image
+        run: docker pull postgres:16
+
+      # tests/conftest.py sets the STRATA_* env defaults itself (placeholder DB URL, dev mode,
+      # test auth secret) before the app imports; the testcontainers fixture supplies the real
+      # database. Ryuk (the reaper) is disabled — GitHub tears the runner down anyway, and it
+      # avoids a privileged sidecar.
+      - name: Run tests
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "true"
+        run: |
+          pytest --cov --cov-report=xml --cov-report=html \
+                 --junitxml=test-results/junit.xml
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: booking-pytest-junit
+          # upload-artifact paths resolve from the repo root, not the job working-directory.
+          path: strata.booking/test-results/junit.xml
+          retention-days: 30
+
+      - name: Upload coverage (HTML + XML)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: booking-coverage
+          path: |
+            strata.booking/htmlcov/
+            strata.booking/coverage.xml
+          retention-days: 30

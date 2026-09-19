@@ -1,0 +1,37 @@
+meta {
+  name: Reschedule (Member)
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/v1/appointments/{{appointmentId}}/reschedule
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{memberToken}}
+}
+
+body:json {
+  {
+    "slot_id": "{{slotId3}}"
+  }
+}
+
+script:post-response {
+  if (res.getStatus() === 201) {
+    bru.setEnvVar("appointmentId", res.getBody().id);
+  }
+}
+
+tests {
+  test("returns 201", function () {
+    expect(res.getStatus()).to.equal(201);
+  });
+}
+
+docs {
+  Member-fulfilled: old record frozen as 'rescheduled', successor linked via original_appointment_id; reminders swap over; both parties notified; AppointmentRescheduled emitted. Saves the successor id.
+}

@@ -1,0 +1,46 @@
+meta {
+  name: 1 Register to Member A
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/v1/device-registrations
+  body: json
+  auth: none
+}
+
+headers {
+  X-API-Key: {{edgeSecret}}
+}
+
+body:json {
+  {
+    "user_id": "m-1",
+    "identifier_type": "SmartMeter Scale",
+    "external_id": "{{scn1Device}}"
+  }
+}
+
+script:pre-request {
+  // A fresh device per run keeps the scenario repeatable from a clean slate.
+  bru.setVar("scn1Device", "SM-SCN1-" + Date.now());
+}
+
+script:post-response {
+  bru.setVar("scn1MappingId", res.getBody().id);
+}
+
+tests {
+  test("201 — an active mapping is created ", function {
+    expect(res.getStatus()).to.equal(201);
+  });
+
+  test("nothing was superseded — this device is new", function () {
+    expect(res.getBody().superseded_user_id).to.equal(null);
+  });
+
+  test("attributed to Member m-1", function () {
+    expect(res.getBody().user_id).to.equal("m-1");
+  });
+}

@@ -1,0 +1,34 @@
+meta {
+  name: 2 Capture and Quarantine
+}
+
+docs {
+  # Scenario 2 — Capture-First, Quarantine, and Manual Resolution (, 2.2b)
+
+  The edge's only job is durable capture: everything authenticated is stored verbatim
+  BEFORE any validation, and readings from unregistered devices end up in quarantine —
+  never silently dropped. Then the operator's manual resolution flow:
+  register the device, replay, and the reading lands with its quarantine record
+  resolved. Run in order; nothing to fill in (request 2 generates a fresh device id
+  per run, so the scenario repeats cleanly).
+
+  1. No API key — rejected, nothing captured
+  2. A valid weight reading from a device nobody registered — captured, 202; the
+     correlation_id in the response is the reading's trace handle everywhere
+  3. A JSON array (not even object-shaped) — still 202: capture has no shape exemption
+  4. Run the pipeline — both messages are processed: the unregistered reading is
+     quarantined, the array fails validation into the retry ladder
+  5. GET the quarantine worklist — the record is there, open, identifiers only
+  6. Register the device to Morgan Lee (m-1) — the fix; nothing reprocesses by itself
+  7. Replay the reading under its ORIGINAL correlation id
+  8. Run the pipeline — the replay attributes, persists, and resolves the record
+  9. GET the worklist again — clear; the resolved row survives as history
+
+  The CLI equivalents of 5/7 are `inv quarantine` and `inv replay --correlation-id <id>`
+  (plus `inv quarantine-discard` for the never-to-be-processed exit).
+
+  Verify (optional):
+  psql: SELECT state FROM quarantined_readings ORDER BY created_at DESC LIMIT 1;
+  — `resolved`; and the reading row itself:
+  SELECT user_id, weight_kg FROM weight_readings ORDER BY created_at DESC LIMIT 1;
+}

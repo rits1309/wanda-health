@@ -1,0 +1,31 @@
+meta {
+  name: Reassignment Options
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{baseUrl}}/v1/appointments/{{appointmentId}}/reassignment-options
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{coachToken}}
+}
+
+script:post-response {
+  const body = res.getBody();
+  if (Array.isArray(body) && body.length) {
+    bru.setEnvVar("reassignSlotId", body[0].slot_id);
+  }
+}
+
+tests {
+  test("returns 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Other programme coaches' slots at the exact original start/duration, per the original booking's language criteria. Empty ⇒ reassignment unavailable.
+}

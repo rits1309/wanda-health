@@ -1,0 +1,23 @@
+meta {
+  name: 8 Replay Is Refused
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{baseUrl}}/v1/dev/replay
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "correlation_id": "{{scn4Correlation}}"
+  }
+}
+
+tests {
+  test("409 — discard is final in Phase 1; the payload exists, replaying is refused", function () {
+    expect(res.getStatus()).to.equal(409);
+  });
+}

@@ -1,0 +1,25 @@
+meta {
+  name: 2 Run Pipeline (walk the retry ladder)
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/v1/dev/pipeline/run
+  body: none
+  auth: none
+}
+
+tests {
+  test("200 — the malformed message was delivered and failed validation", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().processed).to.be.at.least(1);
+  });
+}
+
+docs {
+  With STRATA_PIPELINE_RETRY_DELAY_SECONDS=0 this single run walks the whole ladder:
+  4 deliveries (processed >= 4 if the queue held nothing else), then undeliverable.
+  With the 30s production default, this run advances one delivery — run it again
+  after each delay window to watch receive_count climb instead.
+}

@@ -1,0 +1,24 @@
+meta {
+  name: Search Procedures
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/v1/procedures/search?q=heart
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+tests {
+  test("returns 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  ICD-10-PCS procedure search (code prefix or title substring). Any authenticated user.
+}

@@ -1,0 +1,274 @@
+name: Deploy - UAT
+
+# Triggers on push to uat/** -- intended to mean "merge the UAT promotion
+# PR", not just any push. In practice a uat/** branch sees two pushes: the
+# branch's own creation (cut-uat-branch.yml pushing develop's HEAD as a new
+# ref, before the PR even exists) and the actual PR merge later. Both are
+# "push" events; only the second one should rebuild+deploy. resolve's
+# `if:` below distinguishes them by actor -- cut-uat-branch.yml always
+# pushes as github-actions[bot] (see its own git config), while a PR merge
+# is always attributed to whichever real person clicked merge. Confirmed
+# by a real run: without this, the branch-creation push alone triggered a
+# full rebuild+deploy before anyone had even reviewed the (empty-diff)
+# promotion PR.
+#
+# Re-runs App Tests + full SecOps Scan even though the PR gate (ci.yml's
+# pull_request trigger) already ran them pre-merge -- same
+# belt-and-braces shape ci.yml itself uses for develop (gate on the PR,
+# then re-verify on the actual merge commit before it ships). Then
+# rebuilds in uat's own AWS account's ECR (a separate account from
+# develop's, no cross-account pull set up -- see
+# reusable-build-scan-push.yml's `image_tag` input) and deploys.
+#
+# Tags the merge commit (uat-<date>-<shortsha>) once the deploy succeeds --
+# the permanent, immutable record of what was actually promoted and
+# tested. cut-releases-branch.yml selects the uat branch to release by that
+# tag, and deploy-release.yml promotes the image built from that commit.
+#
+# Same role and name as summit's deploy-uat.yml. Formerly ci-uat.yml
+# ("CI - UAT"); the manual single-service "Deploy - UAT (manual)" workflow
+# that used to live at this path was removed so UAT deploys the way
+# summit's does: only by merging the latest promotion PR.
+
+on:
+  push:
+    branches: ["uat/**"]
+
+# Serializes UAT deploys -- confirmed by a real incident: merging several
+# promotion PRs back to back let their UAT deploy runs race each other's
+# `aws ecs update-service` calls against the SAME services. ECS handled it
+# fine internally (events showed a real, healthy rollout to steady state),
+# but each run's amazon-ecs-deploy-task-definition step was left polling a
+# deployment ID that a concurrent run's update-service call had already
+# superseded, so it reported "not found after stabilization... rolled back
+# by the deployment circuit breaker" for a deploy that had actually
+# succeeded. queue (not cancel-in-progress) so every promotion still gets
+# its own real deploy+tag, just one at a time.
+concurrency:
+  group: ci-uat
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: read
+  pull-requests: write
+  id-token: write
+  # The resolve job reads the promotion PR's check results (gh pr checks).
+  # Without these the token cannot see them, the guard finds none and
+  # refuses every promotion -- which is exactly what the first real run did.
+  checks: read
+  statuses: read
+
+jobs:
+  resolve:
+    name: Resolve services + tag
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+    outputs:
+      services: '["booking","connect","engine-auth","terminology","engine"]'
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+    steps:
+      # Deploys the LATEST uat branch only -- the one the most recent Cut UAT
+      # Branch run created, identified by its promotion PR, the one opened
+      # most recently -- and only when this push is that PR's merge and every
+      # check on the PR passed. Anything else is refused with the reason: a
+      # stale promotion PR merged into an older uat branch, a commit made
+      # straight onto a uat branch (the flow is feature -> develop -> uat,
+      # nothing skips develop and review), or a merge over a failing or
+      # still-running check. Same rule as summit's deploy-uat.yml.
+      - name: Check this is the latest uat branch's promotion merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          latest="$(gh pr list --repo "$REPO" --state all --limit 100 \
+            --json number,baseRefName,createdAt \
+            --jq '[.[] | select(.baseRefName | startswith("uat/"))] | sort_by(.createdAt) | last // empty | "\(.number) \(.baseRefName)"')"
+          if [ -z "$latest" ]; then
+            echo "::error::No promotion PR into a uat/** branch exists, so there is no promotion to deploy. Run Cut UAT Branch and merge the PR it opens."
+            exit 1
+          fi
+          read -r pr latest_branch <<< "$latest"
+
+          if [ "$BRANCH" != "$latest_branch" ]; then
+            echo "::error::Not deploying $BRANCH: it is not the latest uat branch. The latest is $latest_branch (promotion PR #$pr). Only the latest promotion goes to UAT -- if $BRANCH's PR was merged by mistake, nothing was deployed. Close stale promotion PRs rather than merging them."
+            exit 1
+          fi
+
+          # The merge is attributed to the PR moments after the push, so give
+          # GitHub a short while to report it before concluding it is not one.
+          merge_sha=""
+          for i in 1 2 3 4 5 6; do
+            merge_sha="$(gh pr view "$pr" --repo "$REPO" --json state,mergeCommit \
+              --jq 'if .state == "MERGED" then .mergeCommit.oid else "" end')"
+            [ -n "$merge_sha" ] && break
+            sleep 5
+          done
+          if [ "$merge_sha" != "$GITHUB_SHA" ]; then
+            echo "::error::Not deploying $BRANCH at $GITHUB_SHA: this push is not the merge of its promotion PR #$pr${merge_sha:+ (that merge is $merge_sha)}. Changes reach UAT only through develop and a merged promotion PR -- never by committing onto a uat branch."
+            exit 1
+          fi
+
+          # Fails closed: no readable check results means no deploy.
+          checks="$(gh pr checks "$pr" --repo "$REPO" --json name,bucket 2>/dev/null || true)"
+          if [ -z "$checks" ] || [ "$checks" = "[]" ]; then
+            echo "::error::Could not read any check results for promotion PR #$pr, so it can't be confirmed the promotion passed its checks. Refusing to deploy."
+            exit 1
+          fi
+          not_passed="$(printf '%s' "$checks" | jq -r '[.[] | select(.bucket != "pass" and .bucket != "skipping") | "\(.name) (\(.bucket))"] | join(", ")')"
+          if [ -n "$not_passed" ]; then
+            echo "::error::Promotion PR #$pr was merged, but not every check on it passed: $not_passed. UAT only deploys a promotion whose checks all passed."
+            exit 1
+          fi
+
+          echo "Promotion PR #$pr merged by $ACTOR with every check passed -- deploying $BRANCH to UAT"
+          {
+            echo "## Promotion to UAT"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| UAT branch | \`$BRANCH\` (latest) |"
+            echo "| Promotion PR | #$pr (merged by $ACTOR, all checks passed) |"
+            echo "| Commit | \`$GITHUB_SHA\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - id: tag
+        run: echo "image_tag=uat-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+  app-tests:
+    name: App Tests
+    needs: resolve
+    uses: ./.github/workflows/reusable-app-tests.yml
+    with:
+      services: ${{ needs.resolve.outputs.services }}
+      run_tests: true
+
+  secops-scan:
+    name: SecOps Scan
+    needs: resolve
+    uses: ./.github/workflows/reusable-secops-scan.yml
+    with:
+      services: ${{ needs.resolve.outputs.services }}
+      run_full_devsecops_scan: true
+
+  build-scan-push:
+    name: Build, Scan & Push
+    needs: [resolve, app-tests, secops-scan]
+    # needs.resolve.result == 'success' is load-bearing: always() otherwise
+    # runs this even when resolve refused the promotion, since the tests
+    # and scans it skipped count as "not failure". Confirmed by a real run:
+    # resolve refused, and builds, then migrations, ran anyway.
+    if: |
+      always() &&
+      needs.resolve.result == 'success' &&
+      needs.app-tests.result != 'failure' &&
+      needs.secops-scan.result != 'failure'
+    uses: ./.github/workflows/reusable-build-scan-push.yml
+    with:
+      services: ${{ needs.resolve.outputs.services }}
+      environment: uat
+      image_tag: ${{ needs.resolve.outputs.image_tag }}
+    secrets: inherit
+
+  migrate:
+    name: Run Migrations
+    needs: [resolve, build-scan-push]
+    if: |
+      always() &&
+      needs.resolve.result == 'success' &&
+      needs.build-scan-push.result == 'success'
+    uses: ./.github/workflows/reusable-migrate.yml
+    with:
+      environment: uat
+      image_tag: ${{ needs.resolve.outputs.image_tag }}
+    secrets: inherit
+
+  deploy:
+    name: Deploy ${{ matrix.service }} to uat
+    needs: [resolve, build-scan-push, migrate]
+    # always(), not gated on build-scan-push's result -- each service's own
+    # deploy step fails independently (at image resolution) if its build
+    # never produced an image, same as ci.yml's own deploy job is scoped.
+    # migrate's failure DOES block deploy though (needs.migrate.result !=
+    # 'failure') -- unlike a per-service build failure, a bad migration
+    # would break every service at once if deploy proceeded anyway.
+    if: |
+      always() &&
+      needs.resolve.result == 'success' &&
+      needs.migrate.result != 'failure'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [booking, connect, engine-auth, terminology, engine]
+    uses: ./.github/workflows/reusable-ecs-deploy.yml
+    with:
+      environment: uat
+      service: ${{ matrix.service }}
+      image_tag: ${{ needs.resolve.outputs.image_tag }}
+    secrets: inherit
+
+  provision-users:
+    name: Provision test users
+    needs: deploy
+    if: needs.deploy.result == 'success'
+    uses: ./.github/workflows/reusable-provision-users.yml
+    with:
+      environment: uat
+    secrets: inherit
+
+  tag-release-candidate:
+    name: Tag this promotion
+    needs: deploy
+    if: needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create the permanent record tag
+        run: |
+          set -euo pipefail
+          TAG="uat-$(date -u +%Y-%m-%d)-$(git rev-parse --short HEAD)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "UAT promotion confirmed deployed: ${{ github.sha }}"
+          git push origin "$TAG"
+          echo "Tagged $TAG"
+
+  notify:
+    name: Publish Report
+    needs: [resolve, app-tests, secops-scan, build-scan-push, deploy]
+    if: always()
+    uses: ./.github/workflows/reusable-notify.yml
+    with:
+      status: ${{ (needs.app-tests.result == 'failure' || needs.secops-scan.result == 'failure' || needs.build-scan-push.result == 'failure' || needs.deploy.result == 'failure') && 'failure' || 'success' }}
+      body: |
+        Strata.Cloud UAT Deploy (merge)
+
+        Branch:       ${{ github.ref_name }}
+        Commit:       ${{ github.sha }}
+        Image tag:    ${{ needs.resolve.outputs.image_tag }}
+        Triggered by: ${{ github.actor }}
+
+        App Tests:          ${{ needs.app-tests.result }}
+        SecOps Scan:        ${{ needs.secops-scan.result }}
+        Build, Scan & Push: ${{ needs.build-scan-push.result }}
+        Deploy:              ${{ needs.deploy.result }}
+      # See ci.yml's identical comment: "SecOps Gate" is its own row,
+      # distinct from the four always-passing scanner rows above it, so a
+      # run that failed at that fail-fast check doesn't show an
+      # all-green/skipped table with nothing indicating why.
+      checks_json: |
+        {
+          "App Tests": "${{ needs.app-tests.result }}",
+          "Semgrep": "${{ needs.secops-scan.outputs.semgrep_result }}",
+          "CodeQL": "${{ needs.secops-scan.outputs.codeql_result }}",
+          "Trivy (filesystem)": "${{ needs.secops-scan.outputs.trivy_fs_result }}",
+          "Gitleaks": "${{ needs.secops-scan.outputs.gitleaks_result }}",
+          "SecOps Gate": "${{ needs.secops-scan.outputs.secops_gate_result }}",
+          "Build, Scan & Push": "${{ needs.build-scan-push.result }}",
+          "Deploy": "${{ needs.deploy.result }}"
+        }

@@ -1,0 +1,44 @@
+meta {
+  name: Create Recurring
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/v1/unavailability-patterns
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{coachToken}}
+}
+
+body:json {
+  {
+    "days_of_week": [
+      4
+    ],
+    "start_time_local": "12:00",
+    "end_time_local": "13:00",
+    "timezone": "America/New_York",
+    "active_from": "{{fromDate}}",
+    "active_to": "{{toDate}}"
+  }
+}
+
+script:post-response {
+  if (res.getStatus() === 201) {
+    bru.setEnvVar("recurringId", res.getBody().id);
+  }
+}
+
+tests {
+  test("returns 201", function () {
+    expect(res.getStatus()).to.equal(201);
+  });
+}
+
+docs {
+  Recurring unavailable time (Friday lunches).
+}

@@ -1,0 +1,24 @@
+meta {
+  name: 3 Run Pipeline Again (nothing remains)
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/v1/dev/pipeline/run
+  body: none
+  auth: none
+}
+
+tests {
+  test("0 processed — the message is dead-lettered, not looping and not lost", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().processed).to.equal(0);
+  });
+}
+
+docs {
+  Assumes a quiet local queue (nothing else ingesting) and delay 0 — see the folder
+  docs. The dead-lettered message sits in reading_queue as `undeliverable` with its
+  raw payload untouched in raw_readings, ready for operator replay (tooling).
+}

@@ -1,0 +1,312 @@
+name: Deploy - Release (Prod)
+
+# Production's deploy, the same shape as summit's deploy-release.yml. Manual
+# dispatch ONLY: no push or pull_request trigger exists, so merging a release
+# PR deploys nothing by itself. A responsible person runs this from develop
+# (Actions -> Deploy - Release (Prod) -> Run workflow, "Use workflow from:
+# develop") and picks an action:
+#
+#   build-only  checks the latest release is ready and that every image it
+#               needs is in uat's registry, then stops. A dry run.
+#   deploy      promotes those images to prod, runs the prod database
+#               migrations, deploys every service and health-checks it.
+#
+# Nobody chooses WHICH release. It is always the LATEST one: the releases/**
+# branch the most recent Cut Release Branch run created, identified by its
+# release PR, the one opened most recently. It runs only once that PR is
+# MERGED and every check on it PASSED (or was skipped), and otherwise refuses
+# with the reason. It never falls back to an older release.
+#
+# Why the PR must be merged, not just green: a release branch is cut from an
+# older commit and only gains the release's code when its PR merges.
+#
+# Prod does NOT rebuild the application image. It promotes the exact signed
+# image uat already built, scanned and ran. That image is identified by the
+# release PR's head commit -- the uat branch tip the PR merged, which is the
+# commit deploy-uat.yml built as uat-<sha>. Not the release branch's own tip:
+# merging the release PR creates a new merge commit there, and no image was
+# ever built for it.
+#
+# Order on deploy: promote images, then migrate, then deploy. A promotion that
+# fails leaves the database untouched; a migration that fails stops the deploy.
+# The migration image is built from the release commit, whose tree is
+# identical to the uat commit's.
+#
+# Dispatch it from develop (or main). The copy of this file that runs is the
+# one on the branch it was dispatched from, so a copy from anywhere else could
+# deploy a modified workflow to production. The prod environment's required
+# reviewers, once added, are what stop a deliberate attempt; none are
+# configured at the time of writing.
+#
+# This file must also exist on main for GitHub to show a Run workflow button.
+# main itself is never updated from here -- its ruleset refuses direct pushes.
+#
+# Named "releases/**", not "release/**" -- this repo already has a separate,
+# client-owned branch literally named "release", and git can't have both
+# refs/heads/release and refs/heads/release/<x> at once.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "build-only: check the latest release is ready and its images exist in uat, then stop. deploy: promote, migrate, deploy to production and health-check it."
+        required: true
+        type: choice
+        options: [build-only, deploy]
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: read
+  # resolve-release reads the release PR's check results (gh pr checks);
+  # without these the token sees none and every release is refused.
+  checks: read
+  statuses: read
+
+jobs:
+  resolve-release:
+    name: Resolve the latest release
+    runs-on: ubuntu-latest
+    outputs:
+      release_branch: ${{ steps.resolve.outputs.release_branch }}
+      release_sha: ${{ steps.resolve.outputs.release_sha }}
+      release_pr: ${{ steps.resolve.outputs.release_pr }}
+      source_tag: ${{ steps.resolve.outputs.source_tag }}
+      prod_tag: ${{ steps.resolve.outputs.prod_tag }}
+    steps:
+      - name: Check where this was dispatched from
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          case "$REF_NAME" in
+            develop|main) echo "Dispatched from $REF_NAME" ;;
+            *)
+              echo "::error::Run this workflow from develop (or main), not '$REF_NAME'. It picks the release to deploy by itself; running a copy from another branch could deploy a modified workflow to production."
+              exit 1
+              ;;
+          esac
+
+      - name: Find the latest release and check it is ready
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          pr="$(gh pr list --repo "$REPO" --state all --limit 100 \
+            --json number,baseRefName,createdAt \
+            --jq '[.[] | select(.baseRefName | startswith("releases/"))] | sort_by(.createdAt) | last // empty | .number')"
+          if [ -z "$pr" ]; then
+            echo "::error::No release PR exists yet, so there is no release to deploy. Run Cut Release Branch first."
+            exit 1
+          fi
+
+          read -r state branch source source_sha <<< "$(gh pr view "$pr" --repo "$REPO" \
+            --json state,baseRefName,headRefName,headRefOid \
+            --jq '"\(.state) \(.baseRefName) \(.headRefName) \(.headRefOid)"')"
+          echo "Latest release: $branch (release PR #$pr from $source @ $source_sha, state $state)"
+
+          if [ "$state" != "MERGED" ]; then
+            if [ "$state" = "OPEN" ]; then why="is still open"; else why="was closed without being merged"; fi
+            echo "::error::The latest release, $branch, is not ready: its release PR #$pr $why. Until that PR merges, $branch still holds older code, so deploying it would ship the wrong release. Let its checks finish, merge PR #$pr, then run this again."
+            exit 1
+          fi
+
+          # Fails closed: no readable check results means no deploy.
+          checks="$(gh pr checks "$pr" --repo "$REPO" --json name,bucket 2>/dev/null || true)"
+          if [ -z "$checks" ] || [ "$checks" = "[]" ]; then
+            echo "::error::Could not read any check results for release PR #$pr, so it can't be confirmed the release passed its checks. Refusing to deploy."
+            exit 1
+          fi
+          not_passed="$(printf '%s' "$checks" | jq -r '[.[] | select(.bucket != "pass" and .bucket != "skipping") | "\(.name) (\(.bucket))"] | join(", ")')"
+          if [ -n "$not_passed" ]; then
+            echo "::error::Release PR #$pr was merged, but not every check on it passed: $not_passed. Production only deploys a release whose checks all passed."
+            exit 1
+          fi
+
+          release_sha="$(gh api "repos/$REPO/git/ref/heads/$branch" --jq .object.sha)"
+          short="$(printf '%s' "$source_sha" | cut -c1-7)"
+
+          {
+            echo "release_branch=$branch"
+            echo "release_sha=$release_sha"
+            echo "release_pr=$pr"
+            echo "source_tag=uat-$source_sha"
+            echo "prod_tag=prod-$short"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "## Release to production"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Release branch | \`$branch\` @ \`$release_sha\` |"
+            echo "| Release PR | #$pr (merged, all checks passed) |"
+            echo "| Tested in UAT as | \`$source\` @ \`$source_sha\` |"
+            echo "| Images | \`uat-$source_sha\` → \`prod-$short\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # On deploy: copy the signed image from uat's registry into prod's,
+  # unchanged. On build-only: just confirm the image is there.
+  #
+  # cosign copy transfers the manifest bytes, so the digest is preserved
+  # (keeping the existing signature valid) and the signature comes along with
+  # it. A docker pull/tag/push would leave the signature behind in uat.
+  #
+  # uat and prod are separate AWS accounts. Prod's build role is granted
+  # read-only pull on uat's repositories, plus kms:Decrypt restricted to ECR,
+  # by the infra repo. One role, two registry logins: an ECR auth token
+  # authenticates the caller's IAM identity, so the same token works against
+  # uat's registry, where the repository policy admits it.
+  promote-images:
+    name: ${{ inputs.action == 'deploy' && 'Promote' || 'Check' }} ${{ matrix.service }} image
+    needs: resolve-release
+    runs-on: ubuntu-latest
+    environment: prod
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [booking, connect, engine-auth, terminology, engine]
+    env:
+      # uat's registry has no prod-visible GitHub Environment variable (vars.*
+      # resolves to the environment this job binds, which is prod), so the
+      # source is derived here. Account IDs are identifiers, not secrets.
+      UAT_REGISTRY: 110156538935.dkr.ecr.us-east-1.amazonaws.com
+      UAT_REPO_PREFIX: wandahealth-uat-strata
+      # prod's own <registry>/<repo> path, from the same per-service variable
+      # reusable-ecs-deploy.yml reads (engine-auth maps to AUTH).
+      PROD_IMAGE_PATH: ${{ vars[format('ECR_REGISTRY_{0}', matrix.service == 'booking' && 'BOOKING' || matrix.service == 'connect' && 'CONNECT' || matrix.service == 'engine-auth' && 'AUTH' || matrix.service == 'terminology' && 'TERMINOLOGY' || 'ENGINE')] }}
+      ACTION: ${{ inputs.action }}
+    steps:
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_BUILD_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          audience: sts.amazonaws.com
+          role-session-name: GitHubActionsPromote
+
+      - name: Install Cosign
+        if: inputs.action == 'deploy'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Log in to both registries
+        if: inputs.action == 'deploy'
+        run: |
+          set -euo pipefail
+          PROD_REGISTRY="${PROD_IMAGE_PATH%%/*}"
+          TOKEN="$(aws ecr get-login-password --region "${{ vars.AWS_REGION }}")"
+          echo "$TOKEN" | docker login --username AWS --password-stdin "$UAT_REGISTRY"
+          echo "$TOKEN" | docker login --username AWS --password-stdin "$PROD_REGISTRY"
+
+      - name: ${{ inputs.action == 'deploy' && 'Promote the signed image' || 'Check the image exists in uat' }}
+        env:
+          SOURCE_TAG: ${{ needs.resolve-release.outputs.source_tag }}
+          PROD_TAG: ${{ needs.resolve-release.outputs.prod_tag }}
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+
+          UAT_REPO="${UAT_REPO_PREFIX}-${SERVICE}"
+          SRC="${UAT_REGISTRY}/${UAT_REPO}:${SOURCE_TAG}"
+          DST="${PROD_IMAGE_PATH}:${PROD_TAG}"
+
+          SRC_DIGEST="$(aws ecr describe-images \
+            --registry-id "${UAT_REGISTRY%%.*}" \
+            --repository-name "$UAT_REPO" \
+            --image-ids "imageTag=$SOURCE_TAG" \
+            --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)"
+
+          if [ -z "$SRC_DIGEST" ] || [ "$SRC_DIGEST" = "None" ]; then
+            echo "::error::No image tagged $SOURCE_TAG in uat's $UAT_REPO. Prod promotes what uat built, so uat must have deployed this exact commit first."
+            exit 1
+          fi
+
+          if [ "$ACTION" != "deploy" ]; then
+            echo "::notice::$SERVICE ready: $SRC is $SRC_DIGEST. build-only, so nothing was promoted."
+            exit 0
+          fi
+
+          # Prod's repositories have immutable tags, so a re-run after a
+          # partial failure must not try to write the same tag twice.
+          EXISTING="$(aws ecr describe-images \
+            --repository-name "${PROD_IMAGE_PATH#*/}" \
+            --image-ids "imageTag=$PROD_TAG" \
+            --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)"
+          if [ -n "$EXISTING" ] && [ "$EXISTING" != "None" ]; then
+            if [ "$EXISTING" = "$SRC_DIGEST" ]; then
+              echo "::notice::$SERVICE already promoted: $DST is $SRC_DIGEST (a re-run)."
+              exit 0
+            fi
+            echo "::error::$DST already exists with a different digest ($EXISTING, uat has $SRC_DIGEST). Refusing to deploy something other than what uat tested."
+            exit 1
+          fi
+
+          echo "Promoting $SRC ($SRC_DIGEST) -> $DST"
+          cosign copy --force "$SRC" "$DST"
+
+          # Assert the bytes survived the copy rather than trusting it: a digest
+          # mismatch means the signature no longer covers what would ship.
+          DST_DIGEST="$(aws ecr describe-images \
+            --repository-name "${PROD_IMAGE_PATH#*/}" \
+            --image-ids "imageTag=$PROD_TAG" \
+            --query 'imageDetails[0].imageDigest' --output text)"
+
+          if [ "$SRC_DIGEST" != "$DST_DIGEST" ]; then
+            echo "::error::Digest changed during promotion of $SERVICE: uat had $SRC_DIGEST, prod now has $DST_DIGEST. Refusing to treat this as the tested artifact."
+            exit 1
+          fi
+
+          echo "::notice::$SERVICE promoted unchanged at $DST_DIGEST"
+
+  migrate:
+    name: Run Migrations
+    needs: [resolve-release, promote-images]
+    if: inputs.action == 'deploy'
+    uses: ./.github/workflows/reusable-migrate.yml
+    with:
+      environment: prod
+      image_tag: ${{ needs.resolve-release.outputs.prod_tag }}
+      ref: ${{ needs.resolve-release.outputs.release_sha }}
+    secrets: inherit
+
+  deploy:
+    name: Deploy ${{ matrix.service }} to prod
+    needs: [resolve-release, promote-images, migrate]
+    if: inputs.action == 'deploy'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [booking, connect, engine-auth, terminology, engine]
+    uses: ./.github/workflows/reusable-ecs-deploy.yml
+    with:
+      environment: prod
+      service: ${{ matrix.service }}
+      image_tag: ${{ needs.resolve-release.outputs.prod_tag }}
+    secrets: inherit
+
+  tag-release:
+    name: Tag this release
+    needs: [resolve-release, deploy]
+    if: inputs.action == 'deploy' && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-release.outputs.release_sha }}
+
+      - name: Tag the release
+        env:
+          RELEASE_BRANCH: ${{ needs.resolve-release.outputs.release_branch }}
+          RELEASE_PR: ${{ needs.resolve-release.outputs.release_pr }}
+          PROD_TAG: ${{ needs.resolve-release.outputs.prod_tag }}
+        run: |
+          set -euo pipefail
+          TAG="release-$(date -u +%Y-%m-%d)-$(git rev-parse --short HEAD)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "Prod release confirmed deployed: $RELEASE_BRANCH (release PR #$RELEASE_PR), images $PROD_TAG"
+          git push origin "$TAG"
+          echo "Tagged $TAG"

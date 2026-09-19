@@ -1,0 +1,25 @@
+meta {
+  name: 3 Ingest Non-Object JSON
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/v1/readings
+  body: json
+  auth: none
+}
+
+headers {
+  X-API-Key: {{edgeSecret}}
+}
+
+body:json {
+  [1, 2, 3]
+}
+
+tests {
+  test("202 — capture has no shape exemption; the contract is unconfirmed until Phase 2", function () {
+    expect(res.getStatus()).to.equal(202);
+  });
+}

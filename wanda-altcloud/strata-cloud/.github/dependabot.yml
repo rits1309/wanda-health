@@ -1,0 +1,56 @@
+# Dependabot: keeps the exactly-pinned toolchains current.
+#
+# Why this exists: with `>=` floors, what CI checked depended on what shipped that morning
+# rather than on what was committed — sat idle a fortnight and its next run
+# went red on seven lint findings with no source change. The fix is exact pins;
+# this file is what stops exact pins decaying into pinned-and-forgotten.
+#
+# Security updates are a SEPARATE switch, enabled per repository in Settings → Code
+# security. This file governs scheduled VERSION updates only. Both are on.
+version: 2
+
+updates:
+  # One entry covers all eight services via a directory glob, so a new service is watched
+  # the day it lands rather than when somebody remembers to add a row here.
+  - package-ecosystem: pip
+    directories:
+      - "/strata.*"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 5
+    labels: ["dependencies"]
+    # Scheduled version updates cover what we declare; security updates still reach
+    # transitive dependencies regardless of this filter.
+    allow:
+      - dependency-type: direct
+    # A few days' lag before adopting a brand-new release. Malicious or simply broken
+    # releases are usually caught within days, and nothing here is urgent enough to want
+    # a version on its publication day. Security updates are not delayed by this.
+    cooldown:
+      default-days: 5
+      semver-major-days: 10
+    groups:
+      # The verify toolchain moves together: a lint or type-check bump is one review,
+      # and its blast radius is CI rather than runtime. Majors included deliberately —
+      # a mypy or pytest major is exactly what we want to see as a reviewable PR.
+      python-verify-toolchain:
+        applies-to: version-updates
+        patterns: ["ruff", "mypy", "bandit", "pip-audit", "pytest*", "invoke"]
+      # Everything else: minor and patch only. A major on a runtime library is a design
+      # decision that belongs to a human and a ticket, not to a bot PR.
+      python-libraries:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    labels: ["dependencies"]
+    groups:
+      github-actions:
+        patterns: ["*"]

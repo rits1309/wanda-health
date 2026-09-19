@@ -1,0 +1,365 @@
+name: Publish Run Report
+
+# Fully GitHub-native, no AWS involved: downloads every HTML report
+# artifact this run produced (Semgrep, CodeQL, Trivy-fs, Trivy-image,
+# SBOM, Grype, Gitleaks -- whichever jobs actually ran), builds a dashboard
+# front page over them (severity totals, a pass/blocked gate banner, one
+# tile per check with the actually-blocking ones flagged -- see
+# build_index.py), and re-uploads the whole bundle as one artifact so a
+# recipient downloads a single zip instead of hunting through a dozen
+# separate ones. The pass/fail signal itself is left to GitHub's own
+# native Actions email notifications (a per-account setting, Settings ->
+# Notifications -> Actions -- no workflow can configure that on someone
+# else's behalf); this job exists to give that email's run-page link
+# something worth clicking through to.
+#
+# On a pull_request run, the same result also gets posted as a PR comment
+# (create-or-update on the same comment, not a new one per push) -- a
+# reviewer needs the pass/fail per check before merge without digging into
+# the Actions tab first. checks_json carries per-tool granularity (Semgrep/
+# CodeQL/Trivy-fs/Gitleaks individually, not just one aggregate SecOps
+# result) so the comment shows exactly which check to click into.
+
+on:
+  workflow_call:
+    inputs:
+      status:
+        description: "'success' or 'failure' -- the overall result the caller computed"
+        required: true
+        type: string
+      body:
+        description: "Pre-formatted multi-line status details (branch, commit, per-job results, etc.)"
+        required: true
+        type: string
+      checks_json:
+        description: 'JSON object of check name -> conclusion (success/failure/skipped), e.g. {"Semgrep":"success"}'
+        required: true
+        type: string
+
+jobs:
+  publish-report:
+    name: Publish Report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      # Needed for .devsecops/report-template/build_index.py below -- this
+      # job used to build the index page from an inline heredoc script with
+      # no repo dependency; now that it's a checked-in file, the repo has to
+      # actually be on disk. Confirmed by a real run: "python3: can't open
+      # file '.../build_index.py': No such file or directory" without this.
+      - uses: actions/checkout@v4
+
+      - name: Download all report artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: reports
+
+      # Reads every report's own embedded findings JSON (the same blob
+      # template.html renders from) to build a real dashboard -- severity
+      # totals, a pass/blocked gate banner, and one tile per check with the
+      # blocking ones visually flagged -- instead of a bare list of links.
+      # See .devsecops/report-template/build_index.py.
+      # Threshold percentages read from repo Variables (Settings -> Secrets
+      # and variables -> Actions -> Variables) rather than hardcoded, so the
+      # bar can be raised or lowered without a code change -- falls back to
+      # build_index.py's own defaults (80/50/25/10) if unset. The gate on
+      # this label lives in "Enforce risk gate" below, deliberately a
+      # separate later step -- see that step's own comment for why.
+      - name: Build report index page
+        env:
+          SECURITY_THRESHOLD_CRITICAL: ${{ vars.SECURITY_THRESHOLD_CRITICAL }}
+          SECURITY_THRESHOLD_HIGH: ${{ vars.SECURITY_THRESHOLD_HIGH }}
+          SECURITY_THRESHOLD_MEDIUM: ${{ vars.SECURITY_THRESHOLD_MEDIUM }}
+          SECURITY_THRESHOLD_LOW: ${{ vars.SECURITY_THRESHOLD_LOW }}
+        run: |
+          python3 .devsecops/report-template/build_index.py \
+            --reports-dir reports \
+            --run-id "${{ github.run_id }}" \
+            --ref-name "${{ github.ref_name }}" \
+            --sha "${{ github.sha }}" \
+            --generated-at "$(date -u +'%Y-%m-%d %H:%M UTC')" \
+            --out reports/index.html \
+            --risk-output reports/.risk-level \
+            --counts-output reports/.risk-counts.json \
+            ${SECURITY_THRESHOLD_CRITICAL:+--critical-threshold "$SECURITY_THRESHOLD_CRITICAL"} \
+            ${SECURITY_THRESHOLD_HIGH:+--high-threshold "$SECURITY_THRESHOLD_HIGH"} \
+            ${SECURITY_THRESHOLD_MEDIUM:+--medium-threshold "$SECURITY_THRESHOLD_MEDIUM"} \
+            ${SECURITY_THRESHOLD_LOW:+--low-threshold "$SECURITY_THRESHOLD_LOW"}
+
+      - name: Upload bundled report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-report-bundle
+          path: reports/
+          retention-days: 30
+
+      # Runs *after* the report is already built and uploaded, deliberately
+      # -- if this step failed the job before that point (e.g. by making
+      # build_index.py itself exit non-zero), the "Upload bundled report"
+      # step above would be skipped by default (GitHub Actions skips
+      # later steps after a failed one unless `if: always()`), and the one
+      # report you most want to see -- the one explaining why the build is
+      # High/Critical risk -- would never get published.
+      # This is the FULL centralized security gate for the whole run, over
+      # every tool's findings -- every scanner (Semgrep, CodeQL, Trivy
+      # filesystem/image, Grype) uploads its findings and exits clean
+      # regardless of what it found, specifically so a genuine tool crash
+      # is never confused with "this scanner found something" (see
+      # reusable-secops-scan.yml's and reusable-build-scan-push.yml's
+      # identical reasoning). build_index.py sums every tool's findings
+      # across every service into one total per severity: zero tolerance
+      # for critical/high (a single finding anywhere fails the run).
+      # Medium/low are still summed and fully reported (the stats above,
+      # the PR comment) but never fail the run on their own, per the
+      # sign-off -- see build_index.py's own comment on this for why.
+      # Configurable via the SECURITY_THRESHOLD_* repo Variables.
+      #
+      # Not the ONLY gate anymore, though: reusable-secops-scan.yml's own
+      # "SecOps Gate" job runs this same check earlier, right after
+      # Semgrep/CodeQL/Trivy-fs finish, against just their findings --
+      # fail-fast, so a run already over a limit stops before Build, Scan
+      # & Push wastes time on it. This step here is what actually catches
+      # everything: it's the only point in the pipeline where Trivy
+      # (image)/Grype's findings (produced later, in Build, Scan & Push)
+      # are counted at all, so a run that passed the earlier check can
+      # still fail here.
+      #
+      # Known, accepted limitation for this first implementation: Trivy
+      # (image) and Grype both scan the same built image and can each
+      # report the same real CVE independently -- summing raw tool counts
+      # can double-count one vulnerability as two findings. Deduplicating
+      # by CVE + package + version is real future work, not done here.
+      # id: needed so the PR-comment step below can read this step's own
+      # outcome (steps.enforce_gate.outcome) and show it as its own row --
+      # this step's pass/fail is the actual reason the whole run passes or
+      # fails, and the PR comment used to have no row at all for it.
+      - name: Enforce risk gate
+        id: enforce_gate
+        run: |
+          risk="$(cat reports/.risk-level 2>/dev/null || echo NONE)"
+          echo "Computed risk level: $risk"
+
+          # Renders three things from build_index.py's --counts-output,
+          # once to the job log and once to the run summary: the severity
+          # totals (as before), a By tool/service table naming exactly
+          # which check(s) each severity's count came from, and a per-
+          # finding table with rule ID, file:line and message -- so
+          # "which service has the critical/high issue, which tool found
+          # it, what is it" is answered right here, not by opening the
+          # report bundle. See .devsecops/report-template/build_index.py's
+          # --counts-output for where each field comes from.
+          if [ -f reports/.risk-counts.json ]; then
+            report_md="$(jq -r '
+              def sevtable:
+                ["| Severity | Found | Allowed | Status |", "|---|---|---|---|"]
+                + [ .severities[]
+                    | "| " + .severity + " | " + (.found|tostring) + " | "
+                      + (.allowed|tostring) + " | "
+                      + (if .breach then "BREACH" else "OK" end) + " |" ];
+              def sourcetable:
+                if (.by_source|length) == 0 then ["_No checks reported in this run._"]
+                else
+                  ["| Tool | Service | Critical | High | Medium | Low | Status |", "|---|---|---|---|---|---|---|"]
+                  + [ .by_source[]
+                      | "| " + .tool + " | " + .service + " | " + (.critical|tostring) + " | "
+                        + (.high|tostring) + " | " + (.medium|tostring) + " | " + (.low|tostring)
+                        + " | " + .status + " |" ]
+                end;
+              def findingstable:
+                if (.findings|length) == 0 then ["_No individual findings to show._"]
+                else
+                  ["| Severity | Tool | Service | Rule | Location | Message |", "|---|---|---|---|---|---|"]
+                  + [ .findings[]
+                      | "| " + .severity + " | " + .tool + " | " + .service + " | `" + .rule
+                        + "` | `" + .location + "` | " + .message + " |" ]
+                  + (if .findings_omitted > 0
+                     then ["", "_" + (.findings_omitted|tostring) + " more finding(s) not shown -- see the full report bundle._"]
+                     else [] end)
+                end;
+              (["#### Severity totals", ""] + sevtable
+               + ["", "#### By tool / service", ""] + sourcetable
+               + ["", "#### Individual findings", ""] + findingstable)
+              | .[]
+            ' reports/.risk-counts.json)"
+          else
+            report_md="(reports/.risk-counts.json not found -- see reports/index.html instead)"
+          fi
+          echo "$report_md"
+          { echo "### Security gate"; echo; echo "$report_md"; } >> "$GITHUB_STEP_SUMMARY"
+
+          # Also written as findings.md, read by the PR-comment step below
+          # -- this used to be a SEPARATE step ("Collect findings from
+          # SARIF reports") re-deriving severity from raw SARIF `level`
+          # values (a plain "ERROR"/"CRITICAL" string, not the same
+          # critical/high/medium/low buckets this gate actually enforces).
+          # Confirmed by a real PR comment: it showed CodeQL findings as
+          # "ERROR" while this gate had already failed the run on them as
+          # HIGH -- two different classifications of the same finding, one
+          # of which didn't even match the reported risk level. Sourcing
+          # both places from the exact same reports/.risk-counts.json removes
+          # the second classifier entirely, so the PR comment can no longer
+          # disagree with the gate that actually decided pass/fail.
+          printf '%s\n' "$report_md" > findings.md
+
+          # build_index.py's risk_level can now only ever be
+          # NONE/MINIMAL/CRITICAL/HIGH -- medium/low no longer feed the
+          # breach decision at all (see that script's own comment), so
+          # this case is written to only match what can actually occur.
+          case "$risk" in
+            CRITICAL|HIGH)
+              echo "::error::Risk level is $risk -- see the Severity/Found/Allowed/Status table above for which severity pushed it over its limit."
+              exit 1
+              ;;
+          esac
+
+      - name: Write job summary
+        if: always()
+        env:
+          STATUS: ${{ inputs.status }}
+          BODY: ${{ inputs.body }}
+        run: |
+          {
+            echo "## Strata.Cloud CI -- ${STATUS}"
+            echo ""
+            echo '```'
+            echo "$BODY"
+            echo '```'
+            echo ""
+            echo "**Full report:** download the \`ci-report-bundle\` artifact above (Summary tab, bottom of this page), unzip it, and open \`index.html\` -- every tool's HTML report is linked from there."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post or update PR report comment
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          CHECKS_JSON: ${{ inputs.checks_json }}
+          RUN_STATUS: ${{ inputs.status }}
+          # This job's own gate step, read via steps.<id>.outcome since it
+          # runs in this same job -- ci.yml's checks_json can't carry it
+          # (that input is computed before this job even starts, so it can
+          # never know its own future result). Without this row, a run
+          # that failed ONLY here showed a checks table with nothing red
+          # in it at all: every individual scanner passes by design (see
+          # reusable-secops-scan.yml), so this was the one real "why did
+          # this fail" signal missing from the table entirely.
+          ENFORCE_GATE_OUTCOME: ${{ steps.enforce_gate.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- strata-ci-report -->';
+            let checks = {};
+            try {
+              checks = JSON.parse(process.env.CHECKS_JSON);
+            } catch (e) {
+              core.warning(`Could not parse checks_json: ${e.message}`);
+            }
+            checks['Aggregate Severity Gate'] = process.env.ENFORCE_GATE_OUTCOME || 'unknown';
+
+            // Semgrep/CodeQL/Trivy (filesystem) never fail their own job over
+            // a finding -- only a genuine crash does (see
+            // reusable-secops-scan.yml). A plain "Passed"/"Scanned" icon for
+            // these three said nothing about severity, so a row for a tool
+            // that found a HIGH sat green right next to a table proving it
+            // hadn't -- confirmed confusing by a real reviewer reading a real
+            // report. Fixed by sourcing this row's own icon from the exact
+            // same reports/.risk-counts.json the findings table below is
+            // built from (its by_source array, summed across every service
+            // that tool scanned), so the two can never disagree. Gitleaks is
+            // deliberately excluded -- it's the one scanner that DOES fail
+            // its own job on a finding, so "Passed"/"Failed" was already
+            // accurate for it.
+            const SCAN_ONLY = new Set(['Semgrep', 'CodeQL', 'Trivy (filesystem)']);
+            const perTool = {};
+            try {
+              const counts = JSON.parse(fs.readFileSync('reports/.risk-counts.json', 'utf8'));
+              for (const row of (counts.by_source || [])) {
+                const t = perTool[row.tool] || { critical: 0, high: 0, medium: 0, low: 0 };
+                t.critical += row.critical || 0;
+                t.high += row.high || 0;
+                t.medium += row.medium || 0;
+                t.low += row.low || 0;
+                perTool[row.tool] = t;
+              }
+            } catch (e) {
+              core.warning(`Could not read reports/.risk-counts.json: ${e.message}`);
+            }
+
+            const icon = (name, result) => {
+              if (result === 'skipped') return '⏭️ Skipped';
+              if (result === 'failure') return SCAN_ONLY.has(name) ? '❌ Crashed' : '❌ Failed';
+              if (result !== 'success') return result ? `⚠️ ${result}` : '⚠️ Unknown';
+              if (!SCAN_ONLY.has(name)) return '✅ Passed';
+
+              // This tool's own findings, summed across every service --
+              // NOT gated by the current threshold, deliberately: a HIGH
+              // shows red here even while the threshold is temporarily
+              // raised for e2e testing and the Aggregate Severity Gate
+              // still reads Passed. The two gate rows are the ones that
+              // reflect the current policy; this row reflects the tool.
+              const c = perTool[name] || { critical: 0, high: 0, medium: 0, low: 0 };
+              if (c.critical > 0) return `❌ ${c.critical} Critical`;
+              if (c.high > 0) return `❌ ${c.high} High`;
+              if (c.medium > 0 || c.low > 0) return `⚠️ ${c.medium} Medium, ${c.low} Low`;
+              return '✅ Clean';
+            };
+
+            const rows = Object.entries(checks)
+              .map(([name, result]) => `| ${name} | ${icon(name, result)} |`)
+              .join('\n');
+
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const overall = process.env.RUN_STATUS === 'success'
+              ? '### ✅ All checks passed'
+              : '### ❌ One or more checks failed -- this must be resolved before merge';
+
+            let findings = '';
+            try {
+              findings = fs.readFileSync('findings.md', 'utf8').trim();
+            } catch (e) {
+              core.warning(`Could not read findings.md: ${e.message}`);
+            }
+
+            const body = [
+              marker,
+              '## Strata.Cloud CI Report',
+              '',
+              overall,
+              '',
+              '| Check | Result |',
+              '|---|---|',
+              rows,
+              '',
+              '_`Semgrep`/`CodeQL`/`Trivy (filesystem)` show that tool\'s own worst finding across every service it scanned -- never gated by the current threshold, so a row can read High even while `SecOps Gate`/`Aggregate Severity Gate` (the two rows that reflect the actual pass/fail decision under the current threshold) still read Passed. Those tools never fail their own row purely for finding something; only a crash does._',
+              '',
+              findings ? findings + '\n' : '',
+              `[Full run](${runUrl}) -- per-tool SARIF/HTML findings are attached there as the \`ci-report-bundle\` artifact (Summary tab, bottom of the run page).`,
+              '',
+              `_Updated for commit ${context.sha.substring(0, 7)}._`,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

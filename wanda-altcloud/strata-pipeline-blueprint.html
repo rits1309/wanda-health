@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Strata Pipeline Blueprint</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ink: #12161c;
+    --paper: #f5f6f8;
+    --surface: #ffffff;
+    --surface-2: #eef1f3;
+    --border: #dae0e4;
+    --slate: #5b6572;
+    --slate-soft: #838d99;
+    --accent: #1e6f63;
+    --accent-strong: #14524a;
+    --accent-soft: #e3f0ec;
+    --signal: #b3261e;
+    --signal-soft: #fbe9e8;
+    --env-dev: #3e6fa8;
+    --env-dev-soft: #e7eef7;
+    --env-uat: #7a5ea8;
+    --env-uat-soft: #efe9f7;
+    --env-prod: #8a3b63;
+    --env-prod-soft: #f6e9ef;
+    --code-bg: #10141a;
+    --code-fg: #d7dce2;
+    --code-comment: #7d8894;
+    --code-accent: #7fd7c4;
+    --shadow: 0 1px 2px rgba(18,22,28,0.04), 0 8px 24px -12px rgba(18,22,28,0.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ink: #e7e9ec;
+      --paper: #0e1116;
+      --surface: #171b22;
+      --surface-2: #1d222a;
+      --border: #2a3038;
+      --slate: #8a93a0;
+      --slate-soft: #6b7480;
+      --accent: #4fb6a5;
+      --accent-strong: #8fd9cc;
+      --accent-soft: #14332e;
+      --signal: #e5675f;
+      --signal-soft: #3a1c1c;
+      --env-dev: #6e9fd8;
+      --env-dev-soft: #17263a;
+      --env-uat: #a98fd8;
+      --env-uat-soft: #241d3a;
+      --env-prod: #c77a9b;
+      --env-prod-soft: #331e28;
+      --code-bg: #0a0d12;
+      --code-fg: #d7dce2;
+      --code-comment: #6b7480;
+      --code-accent: #7fd7c4;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -12px rgba(0,0,0,0.5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #e7e9ec;
+    --paper: #0e1116;
+    --surface: #171b22;
+    --surface-2: #1d222a;
+    --border: #2a3038;
+    --slate: #8a93a0;
+    --slate-soft: #6b7480;
+    --accent: #4fb6a5;
+    --accent-strong: #8fd9cc;
+    --accent-soft: #14332e;
+    --signal: #e5675f;
+    --signal-soft: #3a1c1c;
+    --env-dev: #6e9fd8;
+    --env-dev-soft: #17263a;
+    --env-uat: #a98fd8;
+    --env-uat-soft: #241d3a;
+    --env-prod: #c77a9b;
+    --env-prod-soft: #331e28;
+    --code-bg: #0a0d12;
+    --code-fg: #d7dce2;
+    --code-comment: #6b7480;
+    --code-accent: #7fd7c4;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -12px rgba(0,0,0,0.5);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3 {
+    font-family: "Big Shoulders", "Arial Narrow", sans-serif;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.01em;
+    text-wrap: balance;
+    color: var(--ink);
+    margin: 0;
+  }
+  code, pre, .mono { font-family: "IBM Plex Mono", ui-monospace, Consolas, monospace; }
+
+  a { color: var(--accent-strong); }
+  a:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .wrap { max-width: 900px; margin: 0 auto; padding: 64px 24px 96px; }
+  .wide { max-width: 1120px; }
+
+  header.hero {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding-bottom: 40px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 48px;
+  }
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent-strong);
+  }
+  h1 { font-size: clamp(34px, 5.2vw, 52px); line-height: 1.02; }
+  .dek {
+    font-size: 18px;
+    color: var(--slate);
+    max-width: 62ch;
+    margin-top: 4px;
+  }
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 18px;
+    list-style: none;
+    padding: 0;
+  }
+  .facts li {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 13px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: var(--slate);
+  }
+  .facts b { color: var(--ink); font-weight: 600; }
+
+  section { margin-bottom: 56px; }
+  section > h2 {
+    font-size: 26px;
+    margin-bottom: 6px;
+  }
+  .section-note {
+    color: var(--slate);
+    font-size: 15px;
+    max-width: 68ch;
+    margin-bottom: 24px;
+  }
+
+  .callout {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--signal);
+    background: var(--signal-soft);
+    border-radius: 8px;
+    padding: 18px 20px;
+    margin-bottom: 48px;
+  }
+  .callout .callout-label {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--signal);
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .callout p { margin: 0 0 8px; }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout code { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 0.9em; }
+
+  figure { margin: 0; }
+  .diagram-frame {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: var(--shadow);
+    overflow-x: auto;
+  }
+  .diagram-frame svg { display: block; width: 100%; height: auto; min-width: 780px; }
+  figcaption {
+    margin-top: 12px;
+    font-size: 14px;
+    color: var(--slate);
+    max-width: 74ch;
+  }
+  .legend-line {
+    margin-top: 8px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12.5px;
+    color: var(--slate-soft);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14.5px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  caption { text-align: left; caption-side: top; }
+  thead th {
+    text-align: left;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--slate);
+    background: var(--surface-2);
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  tbody td {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.file { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--accent-strong); white-space: nowrap; }
+  td .sub { display: block; color: var(--slate); font-size: 13px; margin-top: 2px; }
+  .table-wrap { overflow-x: auto; border-radius: 10px; }
+
+  .tree {
+    background: var(--code-bg);
+    color: var(--code-fg);
+    border-radius: 10px;
+    padding: 22px 24px;
+    font-size: 13.5px;
+    line-height: 1.75;
+    overflow-x: auto;
+    box-shadow: var(--shadow);
+  }
+  .tree .c { color: var(--code-comment); }
+  .tree .hl { color: var(--code-accent); }
+
+  .guardrails {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+  }
+  .g-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .g-card h3 {
+    font-size: 16px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 600;
+    font-family: "IBM Plex Sans", sans-serif;
+    color: var(--ink);
+    margin-bottom: 6px;
+  }
+  .g-card p { margin: 0; color: var(--slate); font-size: 14.5px; }
+
+  .chip {
+    display: inline-block;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 2px 8px;
+    border-radius: 999px;
+  }
+  .chip.dev { background: var(--env-dev-soft); color: var(--env-dev); }
+  .chip.uat { background: var(--env-uat-soft); color: var(--env-uat); }
+  .chip.prod { background: var(--env-prod-soft); color: var(--env-prod); }
+
+  .dispatch-shell {
+    display: grid;
+    grid-template-columns: minmax(280px, 380px) 1fr;
+    gap: 28px;
+    align-items: start;
+  }
+  @media (max-width: 720px) {
+    .dispatch-shell { grid-template-columns: 1fr; }
+  }
+  .dispatch-mock {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .dispatch-mock .dm-head {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12.5px;
+    color: var(--slate);
+  }
+  .dispatch-mock .dm-head b { color: var(--ink); }
+  .dispatch-row { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  .dispatch-row:last-of-type { border-bottom: none; }
+  .dispatch-row label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .dispatch-row .dm-hint {
+    display: block;
+    font-size: 12px;
+    color: var(--slate);
+    font-weight: 400;
+    margin-top: 1px;
+  }
+  .dm-field {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12.5px;
+    color: var(--ink);
+  }
+  .dm-field.dm-empty { color: var(--slate-soft); }
+  .dm-field .dm-caret { color: var(--slate-soft); font-size: 10px; }
+  .dm-run {
+    margin: 14px 16px 16px;
+    background: var(--accent);
+    color: var(--surface);
+    border: none;
+    border-radius: 6px;
+    padding: 8px 16px;
+    font-family: "IBM Plex Sans", sans-serif;
+    font-size: 13.5px;
+    font-weight: 600;
+    cursor: default;
+  }
+  .dispatch-list { display: flex; flex-direction: column; gap: 18px; }
+  .dispatch-list .dl-item {
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 18px;
+    background: var(--surface);
+  }
+  .dispatch-list .dl-item .dl-file {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 13px;
+    color: var(--accent-strong);
+    margin-bottom: 6px;
+  }
+  .dispatch-list .dl-item ul { margin: 0; padding-left: 18px; font-size: 13.5px; color: var(--slate); }
+  .dispatch-list .dl-item li { margin-bottom: 3px; }
+  .dispatch-list .dl-item li code { color: var(--ink); }
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding-top: 24px;
+    color: var(--slate);
+    font-size: 14.5px;
+  }
+  footer p { max-width: 68ch; }
+</style>
+</head>
+<body>
+
+<div class="wrap wide">
+
+  <header class="hero">
+    <div class="eyebrow">DevSecOps Architecture — Strata.Cloud</div>
+    <h1>Strata Pipeline Blueprint</h1>
+    <p class="dek">A build-once, promote-everywhere CI/CD design for the eight-service <code class="mono">strata-cloud</code> monorepo: language-detected tests and security scanning gate every build, one reusable build-and-sign stage feeds ECR, and three environment-scoped deploy pipelines never rebuild what CI already produced.</p>
+    <ul class="facts">
+      <li>root: <b>wanda-altcloud/.github/</b></li>
+      <li>environments: <b class="chip dev">develop</b> <b class="chip uat">UAT</b> <b class="chip prod">prod</b></li>
+      <li>compute: <b>ECS Fargate</b></li>
+      <li>registry: <b>ECR</b>, immutable tags</li>
+    </ul>
+  </header>
+
+  <div class="callout">
+    <div class="callout-label">Prerequisite — verified, not yet applied</div>
+    <p>None of this can run from where the pipeline files live today. GitHub only reads <code>.github/workflows/</code> and <code>.github/dependabot.yml</code> from the literal root of the repository. <code>wanda-altcloud</code> is the one real repo (confirmed via its <code>origin</code> remote and the single top-level <code>.git</code>) — but both <code>strata-cloud/.github/</code> and <code>application-ci-cd/.github/</code> are nested subfolders, and there is no <code>.github/</code> at the true root at all.</p>
+    <p>Every workflow proposed below is written to live at <code>wanda-altcloud/.github/workflows/</code>. Nothing here has been moved, committed, or pushed yet.</p>
+  </div>
+
+  <section>
+    <h2>How a commit becomes a running task</h2>
+    <p class="section-note">One build pipeline runs on every push to <code class="mono">develop</code> or <code class="mono">uat</code> and ends at an immutable image in ECR. Deployment is a separate, later step for all three environments — <code class="mono">prod</code> never triggers a build at all; it re-resolves and deploys the exact image a human already approved.</p>
+
+    <figure>
+      <div class="diagram-frame">
+        <svg viewBox="0 0 1340 560" role="img" aria-label="Pipeline flow: pre-commit hook, then push to develop or uat triggers ci.yml, which fans out to two parallel gates — reusable-app-tests.yml (language-detected unit and smoke tests) and reusable-secops-scan.yml (semgrep, codeql, trivy filesystem scan). Both must pass before reusable-build-scan-push.yml builds, scans, signs, and pushes an immutable image to ECR. From ECR, develop and uat each auto-deploy to their own ECS Fargate environment. A push to the release branch skips the build stage entirely, resolves the same already-built image, requires manual approval, then deploys to production. Every box also accepts a manual workflow_dispatch trigger.">
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor" />
+            </marker>
+            <marker id="arrow-accent" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" class="accent-fill" />
+            </marker>
+            <marker id="arrow-signal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" class="signal-fill" />
+            </marker>
+          </defs>
+
+          <style>
+            svg { color: var(--ink); }
+            .tests-box { fill: var(--surface-2); stroke: var(--slate); stroke-width: 1.4; color: var(--ink); }
+            .accent-box { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; color: var(--accent-strong); }
+            .accent-fill { fill: var(--accent); }
+            .env-dev-box { fill: var(--env-dev-soft); stroke: var(--env-dev); stroke-width: 1.4; color: var(--env-dev); }
+            .env-uat-box { fill: var(--env-uat-soft); stroke: var(--env-uat); stroke-width: 1.4; color: var(--env-uat); }
+            .env-prod-box { fill: var(--env-prod-soft); stroke: var(--env-prod); stroke-width: 1.4; color: var(--env-prod); }
+            .signal-box { fill: var(--signal-soft); stroke: var(--signal); stroke-width: 1.6; color: var(--signal); }
+            .signal-line { stroke: var(--signal); stroke-width: 1.8; }
+            .signal-fill { fill: var(--signal); }
+          </style>
+
+          <!-- ===== spine: pre-commit -> push -> ci.yml ===== -->
+          <g font-family="IBM Plex Mono, monospace" font-size="12.5">
+            <rect x="20" y="65" width="150" height="50" rx="8" fill="none" stroke="currentColor" opacity="0.55"/>
+            <text x="95" y="86" text-anchor="middle">pre-commit</text>
+            <text x="95" y="102" text-anchor="middle" opacity="0.6" font-size="11">gitleaks · local</text>
+
+            <line x1="170" y1="90" x2="196" y2="90" stroke="currentColor" opacity="0.55" marker-end="url(#arrow)"/>
+
+            <rect x="200" y="65" width="140" height="50" rx="8" fill="none" stroke="currentColor" opacity="0.55"/>
+            <text x="270" y="86" text-anchor="middle">git push</text>
+            <text x="270" y="102" text-anchor="middle" opacity="0.6" font-size="11">develop / uat</text>
+
+            <line x1="340" y1="90" x2="368" y2="90" stroke="currentColor" opacity="0.55" marker-end="url(#arrow)"/>
+
+            <rect x="372" y="65" width="110" height="50" rx="8" fill="none" stroke="currentColor" opacity="0.8"/>
+            <text x="427" y="86" text-anchor="middle" font-weight="600">ci.yml</text>
+            <text x="427" y="102" text-anchor="middle" opacity="0.6" font-size="11">orchestrator</text>
+
+            <!-- split -->
+            <path d="M482,88 C 500,68 500,55 516,40" fill="none" stroke="currentColor" opacity="0.5" stroke-width="1.3" marker-end="url(#arrow)"/>
+            <path d="M482,92 C 500,112 500,128 516,140" fill="none" stroke="currentColor" opacity="0.5" stroke-width="1.3" marker-end="url(#arrow)"/>
+
+            <!-- reusable-app-tests -->
+            <rect x="520" y="10" width="240" height="55" rx="8" class="tests-box"/>
+            <text x="640" y="32" text-anchor="middle" font-weight="600">reusable-app-tests.yml</text>
+            <text x="640" y="50" text-anchor="middle" opacity="0.75" font-size="11">unit + smoke · language auto-detect · report</text>
+
+            <!-- reusable-secops-scan -->
+            <rect x="520" y="115" width="240" height="55" rx="8" class="accent-box"/>
+            <text x="640" y="137" text-anchor="middle" font-weight="600">reusable-secops-scan.yml</text>
+            <text x="640" y="155" text-anchor="middle" opacity="0.75" font-size="11">semgrep · codeql · trivy-fs</text>
+
+            <!-- merge into build -->
+            <path d="M760,36 C 790,48 798,60 810,78" fill="none" stroke="currentColor" opacity="0.5" stroke-width="1.3" marker-end="url(#arrow)"/>
+            <path d="M760,142 C 790,126 798,116 810,104" fill="none" stroke="currentColor" opacity="0.5" stroke-width="1.3" marker-end="url(#arrow)"/>
+            <text x="932" y="57" text-anchor="middle" font-size="10.5" opacity="0.7">gate: tests + scans pass</text>
+
+            <!-- build-scan-push -->
+            <rect x="812" y="65" width="240" height="55" rx="8" class="accent-box"/>
+            <text x="932" y="87" text-anchor="middle" font-weight="600">reusable-build-scan-push.yml</text>
+            <text x="932" y="105" text-anchor="middle" opacity="0.75" font-size="11">build · trivy image · grype · sbom · cosign</text>
+
+            <line x1="1052" y1="92" x2="1078" y2="92" stroke="currentColor" opacity="0.55" marker-end="url(#arrow)"/>
+
+            <!-- ECR -->
+            <rect x="1082" y="50" width="230" height="85" rx="10" fill="none" stroke="currentColor" stroke-width="1.6"/>
+            <text x="1197" y="76" text-anchor="middle" font-weight="700">ECR</text>
+            <text x="1197" y="96" text-anchor="middle" font-size="11" opacity="0.75">&lt;service&gt;:&lt;branch&gt;-&lt;sha&gt;</text>
+            <text x="1197" y="114" text-anchor="middle" font-size="10.5" opacity="0.6">immutable, signed</text>
+          </g>
+
+          <!-- ===== fan-out to deploy ===== -->
+          <g font-family="IBM Plex Mono, monospace" font-size="12.5">
+
+            <!-- develop lane -->
+            <path d="M1094,135 C 844,235 464,235 220,312" fill="none" stroke="currentColor" opacity="0.45" stroke-width="1.3" marker-end="url(#arrow)"/>
+            <text x="620" y="258" text-anchor="middle" font-size="10.5" opacity="0.6">if branch = develop</text>
+            <rect x="110" y="314" width="220" height="56" rx="8" fill="none" stroke="currentColor" opacity="0.55"/>
+            <text x="220" y="337" text-anchor="middle">deploy-develop.yml</text>
+            <text x="220" y="355" text-anchor="middle" font-size="10.5" opacity="0.6">workflow_run: ci success</text>
+            <line x1="220" y1="370" x2="220" y2="396" stroke="currentColor" opacity="0.55" marker-end="url(#arrow)"/>
+            <rect x="115" y="398" width="210" height="60" rx="8" class="env-dev-box"/>
+            <text x="220" y="423" text-anchor="middle" font-weight="600">ECS Fargate</text>
+            <text x="220" y="441" text-anchor="middle" font-size="11">develop</text>
+
+            <!-- uat lane -->
+            <path d="M1124,135 C 1014,245 684,245 500,312" fill="none" stroke="currentColor" opacity="0.45" stroke-width="1.3" marker-end="url(#arrow)"/>
+            <text x="860" y="272" text-anchor="middle" font-size="10.5" opacity="0.6">if branch = uat</text>
+            <rect x="400" y="314" width="200" height="56" rx="8" fill="none" stroke="currentColor" opacity="0.55"/>
+            <text x="500" y="337" text-anchor="middle">deploy-uat.yml</text>
+            <text x="500" y="355" text-anchor="middle" font-size="10.5" opacity="0.6">workflow_run: ci success</text>
+            <line x1="500" y1="370" x2="500" y2="396" stroke="currentColor" opacity="0.55" marker-end="url(#arrow)"/>
+            <rect x="400" y="398" width="200" height="60" rx="8" class="env-uat-box"/>
+            <text x="500" y="423" text-anchor="middle" font-weight="600">ECS Fargate</text>
+            <text x="500" y="441" text-anchor="middle" font-size="11">uat</text>
+
+            <!-- release / prod lane -->
+            <rect x="980" y="230" width="200" height="56" rx="8" fill="none" stroke="currentColor" opacity="0.55"/>
+            <text x="1080" y="253" text-anchor="middle">push</text>
+            <text x="1080" y="271" text-anchor="middle" font-size="11" opacity="0.75">release/**</text>
+
+            <path d="M1197,135 C 1180,168 1130,202 1092,228" fill="none" stroke="currentColor" opacity="0.4" stroke-width="1.3" stroke-dasharray="4 4" marker-end="url(#arrow)"/>
+            <text x="1245" y="186" text-anchor="middle" font-size="10" opacity="0.6">no rebuild —</text>
+            <text x="1245" y="199" text-anchor="middle" font-size="10" opacity="0.6">reuses same &lt;sha&gt;</text>
+
+            <line x1="1080" y1="286" x2="1080" y2="308" stroke="currentColor" opacity="0.55" marker-end="url(#arrow)"/>
+
+            <!-- approval diamond -->
+            <polygon points="1080,310 1180,346 1080,382 980,346" class="signal-box"/>
+            <text x="1080" y="341" text-anchor="middle" font-size="11" font-weight="600">manual</text>
+            <text x="1080" y="356" text-anchor="middle" font-size="11" font-weight="600">approval</text>
+
+            <line x1="1080" y1="382" x2="1080" y2="402" class="signal-line" marker-end="url(#arrow-signal)"/>
+            <rect x="975" y="404" width="210" height="54" rx="8" fill="none" stroke="currentColor" opacity="0.55"/>
+            <text x="1080" y="427" text-anchor="middle">release-deploy-prod.yml</text>
+            <text x="1080" y="445" text-anchor="middle" font-size="10.5" opacity="0.6">deploy only</text>
+
+            <line x1="1080" y1="458" x2="1080" y2="480" stroke="currentColor" opacity="0.55" marker-end="url(#arrow)"/>
+            <rect x="980" y="482" width="200" height="60" rx="8" class="env-prod-box"/>
+            <text x="1080" y="507" text-anchor="middle" font-weight="600">ECS Fargate</text>
+            <text x="1080" y="525" text-anchor="middle" font-size="11">prod</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>Tests and security scanning run in parallel, gate the build together, and both must pass before <code class="mono">reusable-build-scan-push.yml</code> ever runs — a failing unit test blocks a bad image exactly like a failing Semgrep rule does. The build stage always ends at one immutable, signed image; deploying it is a separate step per environment. The <code class="mono">release</code> branch skips the build row entirely — it re-resolves the image already built for that commit and waits on a human before it touches prod.</figcaption>
+      <div class="legend-line">Every box above also accepts a manual <code>workflow_dispatch</code> trigger, with its own choice of environment and which checks to run — see below.</div>
+    </figure>
+  </section>
+
+  <section>
+    <h2>Choosing what runs, by hand</h2>
+    <p class="section-note">Every dispatchable file exposes its checks as individual toggles, not one all-or-nothing switch — so a manual run can be as heavy as a full release candidate or as light as "just re-check Semgrep." That's on top of <b>Use workflow from: Branch</b> — GitHub's own selector, present automatically on every one of these four files because each carries a <code class="mono">workflow_dispatch</code> trigger. It lists every branch that has the file (<code class="mono">develop</code>, <code class="mono">uat</code>, <code class="mono">release/**</code>, <code class="mono">main</code>, any <code class="mono">feature/**</code>), and runs <em>that branch's copy</em> of the workflow — nothing extra to configure per branch, it's inherent to the trigger. <code class="mono">ci.yml</code> carries the most inputs; the three deploy pipelines each carry a smaller version of the same idea.</p>
+
+    <div class="dispatch-shell">
+      <div class="dispatch-mock" aria-hidden="true">
+        <div class="dm-head">Run <b>ci.yml</b></div>
+        <div class="dispatch-row">
+          <label>Use workflow from<span class="dm-hint">Lists every branch carrying this file.</span></label>
+          <div class="dm-field">Branch: uat <span class="dm-caret">▾</span></div>
+        </div>
+        <div class="dispatch-row">
+          <label>Environment context<span class="dm-hint">Leave empty to infer from the branch above.</span></label>
+          <div class="dm-field dm-empty">— <span class="dm-caret">▾</span></div>
+        </div>
+        <div class="dispatch-row">
+          <label>Run unit + smoke tests?<span class="dm-hint">Language auto-detected per service.</span></label>
+          <div class="dm-field">true <span class="dm-caret">▾</span></div>
+        </div>
+        <div class="dispatch-row">
+          <label>Run full DevSecOps scan suite?<span class="dm-hint">Semgrep + CodeQL + Trivy fs, all at once.</span></label>
+          <div class="dm-field">false <span class="dm-caret">▾</span></div>
+        </div>
+        <div class="dispatch-row">
+          <label>Run Semgrep only?</label>
+          <div class="dm-field">true <span class="dm-caret">▾</span></div>
+        </div>
+        <div class="dispatch-row">
+          <label>Run CodeQL only?</label>
+          <div class="dm-field">false <span class="dm-caret">▾</span></div>
+        </div>
+        <div class="dispatch-row">
+          <label>Run Trivy filesystem scan only?</label>
+          <div class="dm-field">false <span class="dm-caret">▾</span></div>
+        </div>
+        <button class="dm-run" tabindex="-1">Run workflow</button>
+      </div>
+
+      <div class="dispatch-list">
+        <div class="dl-item">
+          <div class="dl-file">deploy-develop.yml / deploy-uat.yml</div>
+          <ul>
+            <li><code>image_digest</code> — redeploy a specific ECR digest instead of the latest build</li>
+            <li><code>skip_smoke_test</code> — boolean, default <code>false</code></li>
+          </ul>
+        </div>
+        <div class="dl-item">
+          <div class="dl-file">release-deploy-prod.yml</div>
+          <ul>
+            <li><code>image_digest</code> — required; there's no branch push to infer it from on a manual run</li>
+            <li>still waits on the <span class="chip prod">prod</span> environment's required reviewers even when triggered by hand</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <p class="section-note" style="margin-top:20px; margin-bottom:8px;">Picking <code class="mono">Branch: uat</code> here and leaving <b>Environment context</b> blank deploys exactly like an automatic push to <code class="mono">uat</code> would — both read the same <code class="mono">github.ref_name</code>. The Environment field only matters when you want to override that: running <code class="mono">ci.yml</code> from a <code class="mono">feature/**</code> branch but still wanting a <code class="mono">develop</code>-shaped run, for instance.</p>
+
+    <p class="section-note" style="margin-top:0; margin-bottom:0;">Two things left out on purpose: <strong>IaC scanning</strong> (Checkov/tfsec) — there's no Terraform in this pipeline's scope, it belongs to the separate infra pipeline — and this mock substitutes a <strong>Trivy filesystem</strong> toggle for the "Sonar Scan &amp; Quality Gate" field in the reference screenshot, since Sonar isn't part of this stack yet. Swap in a real <code class="mono">run_sonar_scan</code> input later if it's actually getting added.</p>
+  </section>
+
+  <section>
+    <h2>Trigger matrix</h2>
+    <p class="section-note">Eight files, each with exactly one job. Reusable files never trigger on their own — they only run when another workflow calls them.</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>File</th><th>Automatic trigger</th><th>Manual override</th><th>Does</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="file">ci.yml</td>
+            <td>push: <code class="mono">feature/**</code>, <code class="mono">develop</code>, <code class="mono">uat</code><span class="sub">PR into develop/uat</span></td>
+            <td><code class="mono">workflow_dispatch</code><span class="sub">environment · run_tests · run_full_devsecops_scan · run_semgrep · run_codeql · run_trivy_fs</span></td>
+            <td>Fans out to app-tests and secops-scan in parallel, gates on both, then calls build-scan-push.</td>
+          </tr>
+          <tr>
+            <td class="file">reusable-app-tests.yml</td>
+            <td><span class="sub">called only</span></td>
+            <td><code class="mono">workflow_call</code></td>
+            <td>Detects the ecosystem per changed service (<code class="mono">pyproject.toml</code> → pytest, same pattern extends to Node/Java/Go), runs unit tests + a smoke check against <code class="mono">/health</code>, renders one HTML test report.</td>
+          </tr>
+          <tr>
+            <td class="file">reusable-secops-scan.yml</td>
+            <td><span class="sub">called only</span></td>
+            <td><code class="mono">workflow_call</code></td>
+            <td>Semgrep, CodeQL, Trivy filesystem scan, Gitleaks backstop — one gate job, fails the caller if any crosses its threshold. No IaC scanning — out of scope, no Terraform here.</td>
+          </tr>
+          <tr>
+            <td class="file">reusable-build-scan-push.yml</td>
+            <td><span class="sub">called only, after both gates above pass</span></td>
+            <td><code class="mono">workflow_call</code></td>
+            <td>Per-service matrix: docker build → Trivy image scan + Grype → CycloneDX SBOM → Cosign sign → push to ECR as <code class="mono">&lt;branch&gt;-&lt;sha&gt;</code>.</td>
+          </tr>
+          <tr>
+            <td class="file">deploy-develop.yml</td>
+            <td><code class="mono">workflow_run</code>: ci.yml succeeds on develop</td>
+            <td><code class="mono">workflow_dispatch</code><span class="sub">image_digest · skip_smoke_test</span></td>
+            <td>Calls reusable-ecs-deploy with <span class="chip dev">develop</span>. No build, no scan.</td>
+          </tr>
+          <tr>
+            <td class="file">deploy-uat.yml</td>
+            <td><code class="mono">workflow_run</code>: ci.yml succeeds on uat</td>
+            <td><code class="mono">workflow_dispatch</code><span class="sub">image_digest · skip_smoke_test</span></td>
+            <td>Calls reusable-ecs-deploy with <span class="chip uat">UAT</span>. No build, no scan.</td>
+          </tr>
+          <tr>
+            <td class="file">release-deploy-prod.yml</td>
+            <td>push: <code class="mono">release/**</code></td>
+            <td><code class="mono">workflow_dispatch</code><span class="sub">image_digest (required)</span></td>
+            <td>Resolves the image already built for that commit, waits on the <span class="chip prod">prod</span> environment's required reviewers, then deploys. Never builds.</td>
+          </tr>
+          <tr>
+            <td class="file">reusable-ecs-deploy.yml</td>
+            <td><span class="sub">called only</span></td>
+            <td><code class="mono">workflow_call</code></td>
+            <td>Inputs: environment, image digest, service. Renders the task definition, rolls ECS Fargate, runs a smoke test against <code class="mono">/health</code>.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>File &amp; folder structure</h2>
+    <p class="section-note">Flat under <code class="mono">.github/workflows/</code> on purpose — GitHub only resolves local reusable-workflow references (<code class="mono">uses: ./.github/workflows/…</code>) at that one level, so subfolders there would silently break the <code class="mono">uses:</code> lines. The <code class="mono">reusable-</code> prefix is what keeps a flat folder scannable.</p>
+    <div class="tree">
+<span class="c">wanda-altcloud/                          # true repo root — origin remote lives here</span>
+├── .pre-commit-config.yaml           <span class="c"># gitleaks, stages: [pre-commit], repo-wide</span>
+├── .gitleaks.toml
+└── .github/
+    ├── dependabot.yml                <span class="c"># pip (strata.* glob) + docker (per service) + github-actions</span>
+    └── workflows/
+        ├── <span class="hl">ci.yml</span>                     <span class="c"># orchestrator: push/PR → develop, uat, feature/**</span>
+        ├── <span class="hl">reusable-app-tests.yml</span>     <span class="c"># unit + smoke, language auto-detect, HTML report</span>
+        ├── <span class="hl">reusable-secops-scan.yml</span>   <span class="c"># semgrep · codeql · trivy-fs · gitleaks backstop</span>
+        ├── <span class="hl">reusable-build-scan-push.yml</span> <span class="c"># build · trivy image · grype · sbom · cosign · ECR push</span>
+        ├── <span class="hl">reusable-ecs-deploy.yml</span>    <span class="c"># render task def · ecs deploy · smoke test</span>
+        ├── deploy-develop.yml        <span class="c"># auto after ci.yml on develop, + manual dispatch</span>
+        ├── deploy-uat.yml            <span class="c"># auto after ci.yml on uat, + manual dispatch</span>
+        └── release-deploy-prod.yml   <span class="c"># push: release/** → manual approval → prod, deploy-only</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Guardrails this earns</h2>
+    <div class="guardrails">
+      <div class="g-card">
+        <h3>Build once, deploy three times</h3>
+        <p>Every environment runs the exact bytes that were scanned. Nothing rebuilds between develop, uat, and prod — the tag is the proof.</p>
+      </div>
+      <div class="g-card">
+        <h3>A human sits between UAT and prod</h3>
+        <p>The <span class="chip prod">prod</span> GitHub Environment carries required reviewers. <code class="mono">release-deploy-prod.yml</code> can't proceed past the approval job without one.</p>
+      </div>
+      <div class="g-card">
+        <h3>Security can fail the build, not just report it</h3>
+        <p>reusable-secops-scan.yml is a gate, not a dashboard — its job fails the caller when a finding crosses the configured severity, before any image gets built.</p>
+      </div>
+      <div class="g-card">
+        <h3>A broken app fails before it's ever built</h3>
+        <p>reusable-app-tests.yml gates build-scan-push exactly like security does — unit tests and a smoke check against <code class="mono">/health</code>, so no image gets built from code that doesn't even start.</p>
+      </div>
+      <div class="g-card">
+        <h3>One scan definition, eight services</h3>
+        <p>Both reusable files take a service/path input and run once per changed service via a matrix — new services opt in by adding a matrix row, not a new file.</p>
+      </div>
+      <div class="g-card">
+        <h3>Manual is never a dead end</h3>
+        <p>Every automatic trigger has a <code class="mono">workflow_dispatch</code> twin, so a redeploy or a re-run never depends on manufacturing a new commit.</p>
+      </div>
+      <div class="g-card">
+        <h3>The registry is the audit trail</h3>
+        <p>Cosign-signed, SBOM-attached, immutably tagged <code class="mono">&lt;branch&gt;-&lt;sha&gt;</code> images mean "what's running in prod" is always answerable from ECR alone.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p>Nothing above has been written to <code class="mono">.github/</code> yet — this is the design for review. Once you're happy with the shape, the next step is scaffolding the eight workflow files plus the reusable ECS task-definition template, still without committing until you say so.</p>
+  </footer>
+
+</div>
+
+</body>
+</html>

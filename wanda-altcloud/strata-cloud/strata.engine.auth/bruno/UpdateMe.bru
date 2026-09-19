@@ -1,0 +1,55 @@
+meta {
+  name: UpdateMe
+  type: http
+  seq: 7
+}
+
+patch {
+  url: {{baseUrl}}/v1/auth/me
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+body:json {
+  {
+    "first_name": "Dana",
+    "last_name": "Barrett",
+    "display_name": "Dana",
+    "timezone": "America/New_York",
+    "languages": ["en", "es"],
+    "preferred_language": "en"
+  }
+}
+
+tests {
+  test("returns 200 and persists the save", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+  test("echoes the saved fields (the fresh enriched principal)", function () {
+    const body = res.getBody();
+    expect(body.first_name).to.equal("Dana");
+    expect(body.last_name).to.equal("Barrett");
+    expect(body.display_name).to.equal("Dana"); // override wins
+    expect(body.display_name_override).to.equal("Dana");
+    expect(body.timezone).to.equal("America/New_York");
+    expect(body.preferred_language).to.equal("en");
+    expect(body.languages).to.include("en");
+    expect(body.languages).to.include("es");
+  });
+}
+
+docs {
+  The profile page's Save: PATCH /v1/auth/me persists the full set
+  of server-held fields (names, optional display-name override, timezone, spoken
+  languages, preferred language) to the caller's OWN canonical profile and returns
+  the fresh enriched principal. Resolves through the same rule as /me (a user
+  changes only their own profile); a verified subject with no profile is a
+  403, never provisioned. The domain invariants are 422s: non-blank names,
+  at least one spoken language, the preferred language among the spoken ones
+, and a timezone from the closed list. This request MUTATES the
+  signed-in user's profile — run Login first so {{accessToken}} is populated.
+}

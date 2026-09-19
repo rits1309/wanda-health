@@ -1,0 +1,7 @@
+00001 A00     0 Cholera                                                      Cholera
+07115 G932    1 Benign intracranial hypertension                             Benign intracranial hypertension
+09240 H35031  1 Hypertensive retinopathy, right eye                          Hypertensive retinopathy, right eye
+09241 H35032  1 Hypertensive retinopathy, left eye                           Hypertensive retinopathy, left eye
+09242 H35033  1 Hypertensive retinopathy, bilateral                          Hypertensive retinopathy, bilateral
+09243 H35039  1 Hypertensive retinopathy, unspecified eye                    Hypertensive retinopathy, unspecified eye
+11580 I10     1 Essential (primary) hypertension                             Essential (primary) hypertension

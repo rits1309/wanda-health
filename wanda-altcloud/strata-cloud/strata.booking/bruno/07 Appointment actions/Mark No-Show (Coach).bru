@@ -1,0 +1,24 @@
+meta {
+  name: Mark No-Show (Coach)
+  type: http
+  seq: 8
+}
+
+post {
+  url: {{baseUrl}}/v1/appointments/{{appointmentId}}/no-show
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{coachToken}}
+}
+
+tests {
+  test("204 after start, 409 before", function () {
+    expect([204, 409]).to.include(res.getStatus());
+  });
+}
+
+docs {
+  Manual no-show — only valid after the appointment start, so this returns 409 for the future appointments created in this walkthrough. System detection is Dev → Run Jobs (call-record gap ⇒ no_show).
+}

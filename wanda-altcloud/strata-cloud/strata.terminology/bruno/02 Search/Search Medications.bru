@@ -1,0 +1,25 @@
+meta {
+  name: Search Medications
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/v1/medications/search?q=semaglutide
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{token}}
+}
+
+tests {
+  test("returns 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  FDA NDC medication search (brand/generic substring). Any authenticated user; mint a local
+  token with `inv token` and paste it into the environment's `token` var.
+}

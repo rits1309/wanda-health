@@ -1,0 +1,16 @@
+docs {
+  # fast-api-data-migration
+
+  Read-only API over the Summit health-coaching dataset.
+
+  Pick an environment (top-right) before sending requests:
+
+  - **Local Docker** — API on `http://localhost:8000`, backed by the throwaway
+    local Postgres container.
+  - **Live RDS** — API on `http://localhost:8001`, backed by the real AWS RDS
+    through the SSM tunnel.
+
+  Each environment's docs has the exact command to launch the API against that
+  backend. The sample path-param ids (`patient_id`, `coach_id`) and filter values
+  live in the environment vars and on each request.
+}

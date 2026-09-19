@@ -1,0 +1,21 @@
+meta {
+  name: List Patients
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{base_url}}/patients
+  body: none
+  auth: none
+}
+
+params:query {
+  ~status: active
+}
+
+docs {
+  Patient details. Optional filter (toggle on in the Query tab):
+
+  - `status` — active | inactive
+}

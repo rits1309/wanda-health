@@ -1,0 +1,39 @@
+meta {
+  name: Pattern Impact
+  type: http
+  seq: 4
+}
+
+post {
+  url: {{baseUrl}}/v1/availability-patterns/{{patternId}}/impact
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{coachToken}}
+}
+
+body:json {
+  {
+    "days_of_week": [
+      1
+    ],
+    "start_time_local": "11:00",
+    "end_time_local": "13:00",
+    "slot_duration_minutes": 20,
+    "timezone": "America/New_York",
+    "active_from": "{{fromDate}}",
+    "active_to": "{{toDate}}"
+  }
+}
+
+tests {
+  test("returns 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Dry-run: which booked appointments the proposed change would cancel — powers the Summit warning dialog. Empty body = impact of deleting the pattern.
+}

@@ -1,0 +1,38 @@
+meta {
+  name: Mint Coach Token
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/v1/dev/tokens
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "sub": "c-1",
+    "role": "coach",
+    "coach_id": "c-1",
+    "programme_ids": [
+      "p-1"
+    ]
+  }
+}
+
+script:post-response {
+  if (res.getStatus() === 200) {
+    bru.setEnvVar("coachToken", res.getBody().access_token);
+  }
+}
+
+tests {
+  test("returns 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Dev-mode token for the seeded identity — saved to {{coachToken}}. Requires STRATA_DEV_MODE=true (never AWS).
+}

@@ -1,0 +1,20 @@
+meta {
+  name: Describe Alternative (Public)
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/v1/alternatives?token={{alternativeToken}}
+  auth: none
+}
+
+tests {
+  test("returns 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  The pre-set accept-or-reject screen: details fixed, no bearer auth. Get {{alternativeToken}} via Dev → List Notifications after a coach cancellation.
+}

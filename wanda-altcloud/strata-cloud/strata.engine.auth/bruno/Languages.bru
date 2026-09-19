@@ -1,0 +1,33 @@
+meta {
+  name: Languages
+  type: http
+  seq: 8
+}
+
+get {
+  url: {{baseUrl}}/v1/auth/languages
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{accessToken}}
+}
+
+tests {
+  test("returns 200 with a valid access token", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+  test("serves the spoken-language catalogue codes", function () {
+    const body = res.getBody();
+    expect(body).to.be.an("array");
+    expect(body).to.include("en");
+  });
+}
+
+docs {
+  The spoken-language catalogue: the ISO 639-1 codes the profile
+  page renders as checkboxes. Read from the languages catalogue table, so a future
+  migration that adds a language surfaces here without a code change. Any
+  authenticated user may read it (same bearer guard as /me). Run Login first.
+}

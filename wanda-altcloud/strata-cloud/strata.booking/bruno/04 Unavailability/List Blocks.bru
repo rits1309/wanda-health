@@ -1,0 +1,20 @@
+meta {
+  name: List Blocks
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/v1/unavailability-blocks
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{coachToken}}
+}
+
+tests {
+  test("returns 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}

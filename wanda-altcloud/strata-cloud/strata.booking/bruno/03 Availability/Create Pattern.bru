@@ -1,0 +1,45 @@
+meta {
+  name: Create Pattern
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/v1/availability-patterns
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{coachToken}}
+}
+
+body:json {
+  {
+    "days_of_week": [
+      1
+    ],
+    "start_time_local": "10:00",
+    "end_time_local": "12:00",
+    "slot_duration_minutes": 20,
+    "timezone": "America/New_York",
+    "active_from": "{{fromDate}}",
+    "active_to": "{{toDate}}"
+  }
+}
+
+script:post-response {
+  if (res.getStatus() === 201) {
+    bru.setEnvVar("patternId", res.getBody().id);
+  }
+}
+
+tests {
+  test("returns 201", function () {
+    expect(res.getStatus()).to.equal(201);
+  });
+}
+
+docs {
+  Recurring availability (Tuesdays 10–12 ET, 20-min slots). Creation materialises slots to the horizon and emits AvailabilityPatternCreated + SlotsGenerated. Admins add ?coach_id=<id> to act for a coach.
+}

@@ -1,0 +1,24 @@
+meta {
+  name: 5 Run Pipeline (nothing duplicates)
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/v1/dev/pipeline/run
+  body: none
+  auth: none
+}
+
+tests {
+  test("the re-send was processed — recognised as a duplicate, acknowledged, nothing written", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().processed).to.be.at.least(1);
+  });
+}
+
+docs {
+  The psql checks in the folder docs prove the point: still exactly one weight_readings
+  row and one reading.received outbox event for this run's provider reading id
+  (— duplicate delivery creates nothing).
+}

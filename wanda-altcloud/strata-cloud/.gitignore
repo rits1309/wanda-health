@@ -1,0 +1,12 @@
+# Repo-wide ignores for every strata.* service (each service may add its own).
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+.env
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.hypothesis/
+.DS_Store

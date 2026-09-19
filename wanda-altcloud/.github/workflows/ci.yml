@@ -1,0 +1,385 @@
+name: CI - Develop
+
+# Orchestrator: fans out to reusable-app-tests.yml and
+# reusable-secops-scan.yml in parallel, gates on both, then calls
+# reusable-build-scan-push.yml and, on a real push to develop, this file's
+# own `deploy` job. Only builds and deploys for develop -- promoting to
+# uat is cut-uat-branch.yml (opens the promotion PR) + deploy-uat.yml (builds
+# and deploys on merge, since uat is a separate AWS account with no
+# cross-account ECR access from develop's), and prod is
+# deploy-release.yml's.
+#
+# Every dispatchable input below is an individual toggle rather than one
+# all-or-nothing switch, so a manual run can be as light as "just re-check
+# Semgrep" or as heavy as a full release-candidate pass.
+
+on:
+  push:
+    # uat deliberately excluded from this file's own push trigger -- it has
+    # its own dedicated one in deploy-uat.yml (push: branches: ["uat/**"]),
+    # since uat rebuilds independently rather than reusing what this file
+    # builds for develop. A PR into a uat/** branch still runs the full
+    # gate below for pre-merge review (see the pull_request trigger).
+    branches: ["feature/**", develop]
+  # releases/** included for the same reason as uat/**: the promotion PR
+  # cut-releases-branch.yml opens must actually be scanned before the
+  # responsible person merges it and dispatches a prod deploy. A PR into
+  # either branch runs App Tests + the full SecOps Scan and nothing else
+  # -- build-scan-push/migrate/deploy below are all scoped to
+  # workflow_dispatch or a real push to develop, so a promotion PR is
+  # reviewed and gated without building or deploying anything.
+  pull_request:
+    branches: [develop, "uat/**", "releases/**"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment context: develop or uat (leave empty to infer from branch)"
+        required: false
+        type: string
+        default: ""
+      services:
+        description: "Comma-separated service keys to run (booking,connect,engine-auth,terminology,engine) -- leave empty for all"
+        required: false
+        type: string
+        default: ""
+      run_tests:
+        description: "Run unit + smoke tests"
+        required: false
+        type: boolean
+        default: true
+      run_full_devsecops_scan:
+        description: "Run Semgrep + CodeQL + Trivy-fs, all at once"
+        required: false
+        type: boolean
+        default: false
+      run_semgrep:
+        required: false
+        type: boolean
+        default: true
+      run_codeql:
+        required: false
+        type: boolean
+        default: false
+      run_trivy_fs:
+        required: false
+        type: boolean
+        default: false
+      force_build_despite_test_failures:
+        description: "DANGER: build & push even if App Tests failed. Manual proof-of-mechanism only -- never enable for a real deploy candidate."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+  # A caller's top-level permissions are a hard ceiling on what any reusable
+  # workflow it calls can request -- reusable-build-scan-push.yml's job asks
+  # for id-token: write (AWS OIDC) and, without this, GitHub rejects the
+  # *entire* workflow at startup (zero jobs even created), not just that job.
+  # Confirmed by bisection: removing this line alone reproduces the failure.
+  id-token: write
+
+jobs:
+  detect-services:
+    name: Detect changed services
+    runs-on: ubuntu-latest
+    outputs:
+      services: ${{ steps.combine.outputs.services }}
+      environment: ${{ steps.env.outputs.environment }}
+      image_tag: ${{ steps.env.outputs.image_tag }}
+      run_tests: ${{ steps.combine.outputs.run_tests }}
+      run_semgrep: ${{ steps.combine.outputs.run_semgrep }}
+      run_codeql: ${{ steps.combine.outputs.run_codeql }}
+      run_trivy_fs: ${{ steps.combine.outputs.run_trivy_fs }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve environment context
+        id: env
+        run: |
+          INPUT_ENV="${{ github.event.inputs.environment }}"
+          if [ -n "$INPUT_ENV" ]; then
+            ENVIRONMENT="$INPUT_ENV"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            ENVIRONMENT="${{ github.event.pull_request.base.ref }}"
+          elif [[ "${{ github.ref_name }}" == uat/* ]]; then
+            # Unreachable via push -- uat/** has its own dedicated push
+            # trigger in deploy-uat.yml, never this file. Kept as a defensive
+            # fallback for a manual workflow_dispatch run of this file left
+            # with Environment context blank while dispatched from a
+            # uat/** branch.
+            ENVIRONMENT="uat"
+          else
+            ENVIRONMENT="develop"
+          fi
+          echo "environment=$ENVIRONMENT" >> "$GITHUB_OUTPUT"
+
+          # Single source of truth for the image tag build-scan-push
+          # produces and deploy consumes -- both must compute the exact
+          # same string. This is deliberately based on ref_name (what was
+          # actually built), not $ENVIRONMENT (where it's being deployed):
+          # those only coincide by luck on a plain push to develop/uat.
+          # A workflow_dispatch run on a feature branch with
+          # environment=develop would otherwise have deploy look for an
+          # image tagged "develop-<sha>" that build-scan-push never
+          # produced (it tags by ref_name) -- found by inspection, not yet
+          # hit in a real run, since every real test so far happened to
+          # dispatch with ref_name already equal to the chosen environment.
+          # tr sanitizes branch names with slashes (e.g.
+          # feature/application-ci-cd), same as reusable-build-scan-push.yml's
+          # own tag construction -- keep both in sync if either changes.
+          SAFE_REF="$(echo "${{ github.ref_name }}" | tr '/' '-')"
+          echo "image_tag=${SAFE_REF}-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Combine into services JSON
+        id: combine
+        env:
+          SERVICES_OVERRIDE: ${{ github.event.inputs.services }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -n "$SERVICES_OVERRIDE" ]; then
+              SERVICES_JSON=$(echo "$SERVICES_OVERRIDE" | python3 -c "import json,sys; print(json.dumps([s.strip() for s in sys.stdin.read().split(',') if s.strip()]))")
+              echo "services=$SERVICES_JSON" >> "$GITHUB_OUTPUT"
+            else
+              echo 'services=["booking","connect","engine-auth","terminology","engine"]' >> "$GITHUB_OUTPUT"
+            fi
+            # github.event.inputs.* are always strings and reliably reflect the
+            # declared default even when not explicitly passed via -f. A manual
+            # dispatch keeps CodeQL/Trivy-fs opt-in (default false) for fast
+            # iteration -- run_full_devsecops_scan=true still forces both on,
+            # handled separately in secops-scan's own with: block below.
+            echo "run_tests=${{ github.event.inputs.run_tests }}" >> "$GITHUB_OUTPUT"
+            echo "run_semgrep=${{ github.event.inputs.run_semgrep }}" >> "$GITHUB_OUTPUT"
+            echo "run_codeql=${{ github.event.inputs.run_codeql }}" >> "$GITHUB_OUTPUT"
+            echo "run_trivy_fs=${{ github.event.inputs.run_trivy_fs }}" >> "$GITHUB_OUTPUT"
+          else
+            # Every real push/PR scans every service, not just the ones a diff
+            # touched -- previously path-scoped via dorny/paths-filter, but that
+            # meant secret scanning (Gitleaks) and code scanning could silently
+            # skip entirely on a commit that only touched .github/workflows/**,
+            # and meant a change to one service's code never re-verified the
+            # others. Full-branch scanning on every run, per explicit instruction.
+            echo 'services=["booking","connect","engine-auth","terminology","engine"]' >> "$GITHUB_OUTPUT"
+            # inputs.* only exist for workflow_dispatch -- null on push/pull_request.
+            # GitHub coerces both null and false to 0 for comparison, so the
+            # natural-looking `inputs.run_tests != false` silently evaluates to
+            # false on every real push/PR (confirmed by a real run: App Tests and
+            # Semgrep both skipped despite services resolving correctly). Default
+            # explicitly to true here instead of relying on that comparison --
+            # every real push/PR now runs the full gate: tests, Semgrep, CodeQL,
+            # and a filesystem Trivy pass, matching the client's Stage 1 spec.
+            echo "run_tests=true" >> "$GITHUB_OUTPUT"
+            echo "run_semgrep=true" >> "$GITHUB_OUTPUT"
+            echo "run_codeql=true" >> "$GITHUB_OUTPUT"
+            echo "run_trivy_fs=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  app-tests:
+    name: App Tests
+    needs: detect-services
+    uses: ./.github/workflows/reusable-app-tests.yml
+    with:
+      services: ${{ needs.detect-services.outputs.services }}
+      # Comparing two strings always yields a real boolean (no type ambiguity
+      # across triggers, unlike `inputs.run_tests != false` -- see
+      # detect-services' "Combine into services JSON" step for why that broke).
+      run_tests: ${{ needs.detect-services.outputs.run_tests == 'true' }}
+
+  secops-scan:
+    name: SecOps Scan
+    needs: detect-services
+    uses: ./.github/workflows/reusable-secops-scan.yml
+    with:
+      services: ${{ needs.detect-services.outputs.services }}
+      run_full_devsecops_scan: ${{ inputs.run_full_devsecops_scan == true }}
+      run_semgrep: ${{ needs.detect-services.outputs.run_semgrep == 'true' }}
+      run_codeql: ${{ needs.detect-services.outputs.run_codeql == 'true' }}
+      run_trivy_fs: ${{ needs.detect-services.outputs.run_trivy_fs == 'true' }}
+
+  build-scan-push:
+    name: Build, Scan & Push
+    needs: [detect-services, app-tests, secops-scan]
+    # Only on a real push to develop -- a PR or a feature/** push gets
+    # tested and scanned (ci.yml triggers on feature/** too, for fast
+    # iteration feedback) but doesn't produce an image; nothing downstream
+    # deploys from those anyway. uat deliberately excluded: it's a
+    # separate AWS account with no cross-account ECR access from develop's,
+    # so uat gets its own dedicated build via deploy-uat.yml rather than
+    # trying to reuse an image it can't actually pull. Manual dispatch can
+    # still exercise a build against any environment (default develop)
+    # since that's a deliberate human choice, not an automatic rebuild on
+    # every merge.
+    #
+    # force_build_despite_test_failures exists solely so a manual dispatch
+    # can prove the build/push/sign mechanism against a service whose own
+    # tests are currently failing (e.g. a pre-existing client-code bug) --
+    # it must never be relied on for a real deploy candidate. 
+    if: |
+      always() &&
+      (needs.app-tests.result != 'failure' || inputs.force_build_despite_test_failures == true) &&
+      needs.secops-scan.result != 'failure' &&
+      needs.detect-services.outputs.services != '[]' &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'push' && github.ref_name == 'develop')
+      )
+    uses: ./.github/workflows/reusable-build-scan-push.yml
+    with:
+      services: ${{ needs.detect-services.outputs.services }}
+      environment: ${{ needs.detect-services.outputs.environment }}
+    secrets: inherit
+
+  migrate:
+    name: Run Migrations
+    needs: [detect-services, build-scan-push, notify]
+    # Same gating as build-scan-push -- runs only where an image actually
+    # got built. Before deploy: the freshly-built image's schema
+    # expectations must be in place before any service starts using it.
+    #
+    # needs.notify.result == 'success' is the actual security gate check:
+    # `notify` runs the centralized "Enforce risk gate" step (see
+    # reusable-notify.yml) and used to run in parallel with migrate/deploy
+    # rather than blocking them -- confirmed by inspecting this exact job
+    # graph: deploy only ever needed build-scan-push and migrate, never
+    # notify, so a run that failed the security gate still deployed
+    # anyway and only turned red in the Actions UI after the fact. Adding
+    # notify here (and transitively, via migrate, to deploy and
+    # provision-users) is what actually stops a bad build from reaching
+    # ECS, not just reporting on it afterwards.
+    if: |
+      always() &&
+      needs.build-scan-push.result == 'success' &&
+      needs.notify.result == 'success' &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'push' && github.ref_name == 'develop')
+      )
+    uses: ./.github/workflows/reusable-migrate.yml
+    with:
+      environment: ${{ needs.detect-services.outputs.environment }}
+      image_tag: ${{ needs.detect-services.outputs.image_tag }}
+    secrets: inherit
+
+  deploy:
+    name: Deploy ${{ matrix.service }}
+    needs: [detect-services, build-scan-push, migrate]
+    # This is the automatic deploy path for develop only -- deploy-develop.yml
+    # used to also have one (triggered via workflow_run off "CI"
+    # completing), but GitHub only registers workflow_run/workflow_dispatch
+    # triggers from whatever's on the repository's DEFAULT branch (main),
+    # confirmed by a real test: even after CI ran successfully on develop,
+    # `gh run list --workflow deploy-develop.yml` still 404'd, because that
+    # file had only ever been merged into develop, not main. Rather than
+    # force a main sync just to keep that path alive, deploy was moved here
+    # -- ci.yml is already registered and already triggers correctly on
+    # every push to develop. deploy-develop.yml now only handles manual
+    # redeploy/rollback (pinning an explicit image digest), which this job
+    # doesn't cover and is still genuinely useful standalone.
+    #
+    # uat deliberately excluded -- it has its own dedicated push trigger and
+    # build+deploy in deploy-uat.yml, not this file at all. See this file's
+    # push: trigger comment.
+    #
+    # always() + fail-fast: false so one service's build failure doesn't
+    # block deploying the others -- each service's own deploy step fails
+    # independently (at image resolution) if its build never produced an
+    # image, same as every other stage in this pipeline is scoped.
+    #
+    # needs.migrate.result == 'success' -- deliberately == 'success', not
+    # the more permissive != 'failure' this used to read. A real dispatched
+    # test run proved why that distinction matters: when the security gate
+    # (see notify's "Enforce risk gate" step) fails, migrate is SKIPPED
+    # (its own if: requires needs.notify.result == 'success'), and a
+    # skipped job's result is "skipped", not "failure" -- so != 'failure'
+    # was true and deploy ran anyway, pushing a build straight to ECS that
+    # had just failed its own severity gate. There is no run where deploy
+    # is meant to proceed while migrate didn't actually succeed: on every
+    # event this job's own condition below allows, migrate is gated by the
+    # exact same event check plus build-scan-push/notify success, so a
+    # legitimate no-op (wrong event, or nothing built) is already excluded
+    # by this job's other conditions, not by this one being loose.
+    if: |
+      always() &&
+      needs.migrate.result == 'success' &&
+      needs.detect-services.outputs.services != '[]' &&
+      (
+        github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'push' && github.ref_name == 'develop')
+      )
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(needs.detect-services.outputs.services) }}
+    uses: ./.github/workflows/reusable-ecs-deploy.yml
+    with:
+      environment: ${{ needs.detect-services.outputs.environment }}
+      service: ${{ matrix.service }}
+      # Must match build-scan-push's own tag exactly -- see detect-services'
+      # "Resolve environment context" step for why this is ref_name-based,
+      # not environment-based.
+      image_tag: ${{ needs.detect-services.outputs.image_tag }}
+    secrets: inherit
+
+  provision-users:
+    name: Provision test users
+    needs: [detect-services, deploy]
+    # develop only -- a workflow_dispatch run against uat still deploys via
+    # this same job (see the `deploy` job's own comment), but provisioning
+    # uat's users is deploy-uat.yml's job, not this file's, to keep exactly one
+    # path per environment.
+    if: |
+      always() &&
+      needs.deploy.result == 'success' &&
+      needs.detect-services.outputs.environment == 'develop'
+    uses: ./.github/workflows/reusable-provision-users.yml
+    with:
+      environment: develop
+    secrets: inherit
+
+  notify:
+    name: Publish Report
+    needs: [detect-services, app-tests, secops-scan, build-scan-push]
+    # always() so the report still publishes on a failing run -- a failed
+    # gate is exactly when you most want the report, not less.
+    #
+    # This job is now a real gate, not just reporting: its own "Enforce
+    # risk gate" step (reusable-notify.yml) is what migrate/deploy/
+    # provision-users actually wait on (via migrate's needs.notify.result
+    # check), so a severity-limit breach here stops the pipeline before
+    # anything reaches ECS -- not just an after-the-fact red X once
+    # deploy has already run.
+    if: always()
+    uses: ./.github/workflows/reusable-notify.yml
+    with:
+      status: ${{ (needs.app-tests.result == 'failure' || needs.secops-scan.result == 'failure' || needs.build-scan-push.result == 'failure') && 'failure' || 'success' }}
+      body: |
+        Strata.Cloud CI/CD Pipeline
+
+        Branch:       ${{ github.ref_name }}
+        Commit:       ${{ github.sha }}
+        Triggered by: ${{ github.event_name }} (${{ github.actor }})
+
+        App Tests:          ${{ needs.app-tests.result }}
+        SecOps Scan:        ${{ needs.secops-scan.result }}
+        Build, Scan & Push: ${{ needs.build-scan-push.result }}
+      # "SecOps Gate" (added alongside the fail-fast severity check in
+      # reusable-secops-scan.yml) is its own row, distinct from the four
+      # scanner rows above it -- those are always success/skipped by
+      # design (no scanner fails its own job on a finding), so without
+      # this row a run that failed AT that fail-fast check showed a PR
+      # comment table with nothing red in it at all. reusable-notify.yml
+      # itself appends one more row ("Aggregate Severity Gate") for its
+      # own later gate, which can't be computed here since this input is
+      # built before that job even runs.
+      checks_json: |
+        {
+          "App Tests": "${{ needs.app-tests.result }}",
+          "Semgrep": "${{ needs.secops-scan.outputs.semgrep_result }}",
+          "CodeQL": "${{ needs.secops-scan.outputs.codeql_result }}",
+          "Trivy (filesystem)": "${{ needs.secops-scan.outputs.trivy_fs_result }}",
+          "Gitleaks": "${{ needs.secops-scan.outputs.gitleaks_result }}",
+          "SecOps Gate": "${{ needs.secops-scan.outputs.secops_gate_result }}",
+          "Build, Scan & Push": "${{ needs.build-scan-push.result }}"
+        }

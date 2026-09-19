@@ -1,0 +1,46 @@
+meta {
+  name: Refresh
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/v1/auth/refresh
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "refresh_token": "{{refreshToken}}"
+  }
+}
+
+script:post-response {
+  // Refresh returns new access/id tokens (but no new refresh token),
+  // so update those two in the active environment.
+  if (res.getStatus() === 200) {
+    const body = res.getBody();
+    bru.setEnvVar("accessToken", body.access_token);
+    bru.setEnvVar("idToken", body.id_token);
+  }
+}
+
+tests {
+  test("refresh returns 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+  test("returns a fresh access token", function () {
+    expect(res.getBody()).to.have.property("access_token");
+  });
+}
+
+docs {
+  Exchanges the saved {{refreshToken}} for new access/id tokens
+  (REFRESH_TOKEN_AUTH). The summit app client is public (no secret), so no
+  SECRET_HASH is needed. With a CONFIDENTIAL client, add "sub" to the body —
+  the token's subject, which is what Cognito keys this flow's hash on (NOT
+  the sign-in identifier: the username and its email alias never key it).
+  Run Login first so {{refreshToken}} is populated. Requires
+  ALLOW_REFRESH_TOKEN_AUTH on the app client (enabled by default).
+}

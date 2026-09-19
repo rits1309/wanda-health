@@ -1,0 +1,75 @@
+name: Connect · Tests
+
+# strata.connect is one subproject in this multi-service repo; scope CI to it by path
+# so unrelated changes don't trigger this run. strata.core and strata.identity are local path dependencies,
+# so a kernel change re-gates this consumer (see engine-auth-tests.yml).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "strata.connect/**"
+      - "strata.core/**"
+      - "strata.identity/**"
+      - ".github/workflows/connect-tests.yml"
+  pull_request:
+    paths:
+      - "strata.connect/**"
+      - "strata.core/**"
+      - "strata.identity/**"
+      - ".github/workflows/connect-tests.yml"
+
+jobs:
+  pytest:
+    name: pytest (unit + api + integration)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The service lives in the strata.connect/ subfolder; run every step from there.
+    defaults:
+      run:
+        working-directory: strata.connect
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: strata.connect/pyproject.toml
+
+      # strata-core is a local path dependency (see pyproject.toml); install it editable
+      # from the sibling folder — the booking service's pattern.
+      - name: Install dependencies
+        run: pip install -e ../strata.core -e ../strata.identity -e ".[dev]"
+
+      # The suite runs against an ephemeral Postgres via testcontainers, plus the hermetic
+      # `integration` test's Jaeger (Docker is preinstalled on the runner). Ryuk (the
+      # reaper) is disabled — GitHub tears the runner down anyway, and it avoids a
+      # privileged sidecar. Import-time Settings get placeholders from tests/conftest.py.
+      - name: Pre-pull test images
+        run: docker pull postgres:16
+
+      - name: Run tests
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "true"
+        run: |
+          pytest --cov --cov-report=xml --cov-report=html \
+                 --junitxml=test-results/junit.xml
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pytest-junit
+          # upload-artifact paths resolve from the repo root, not the job working-directory.
+          path: strata.connect/test-results/junit.xml
+          retention-days: 30
+
+      - name: Upload coverage (HTML + XML)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: |
+            strata.connect/htmlcov/
+            strata.connect/coverage.xml
+          retention-days: 30

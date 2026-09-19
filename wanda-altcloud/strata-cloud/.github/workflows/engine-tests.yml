@@ -1,0 +1,63 @@
+name: Engine · Tests
+
+# strata.engine is one subproject in this multi-service repo; scope CI to it by path.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "strata.engine/**"
+      - ".github/workflows/engine-tests.yml"
+  pull_request:
+    paths:
+      - "strata.engine/**"
+      - ".github/workflows/engine-tests.yml"
+
+jobs:
+  pytest:
+    name: pytest (api + baseline + telemetry)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The service lives in the strata.engine/ subfolder; run every step from there.
+    defaults:
+      run:
+        working-directory: strata.engine
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: strata.engine/pyproject.toml
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      # Runs the suite once with coverage; emits JUnit XML + XML/HTML coverage. The hermetic
+      # `integration` (Jaeger) test uses testcontainers (Docker is preinstalled on the runner);
+      # Ryuk is disabled — GitHub tears the runner down anyway.
+      - name: Run tests
+        env:
+          TESTCONTAINERS_RYUK_DISABLED: "true"
+        run: |
+          pytest --cov --cov-report=xml --cov-report=html \
+                 --junitxml=test-results/junit.xml
+
+      - name: Upload JUnit results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pytest-junit
+          # upload-artifact paths resolve from the repo root, not the job working-directory.
+          path: strata.engine/test-results/junit.xml
+          retention-days: 30
+
+      - name: Upload coverage (HTML + XML)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: |
+            strata.engine/htmlcov/
+            strata.engine/coverage.xml
+          retention-days: 30

@@ -1,0 +1,36 @@
+# Virtual environment
+.venv/
+
+# Python caches / build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Test / coverage / tooling artifacts (regenerated per run / in CI)
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+coverage.xml
+htmlcov/
+test-results/
+
+# Reference-data downloads: the FDA NDC export (~232MB unzipped, exceeds GitHub limits) and the
+# CMS ICD-10-PCS / ICD-10-CM order files are fetched into this project-local scratch dir
+# (inv fetch-drugs / fetch-procedures / fetch-diagnoses) and never tracked. Ingest loads them
+# into PostgreSQL; clean deletes them (see tasks.py + scripts/sources.py). The committed
+# tests/fixtures/sample-*.{json,txt} seed the (testcontainers) test database instead.
+var/
+
+# Local environment overrides (incl. STRATA_DATABASE_URL)
+.env
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store

@@ -1,0 +1,65 @@
+name: Deploy - Develop (manual)
+
+# Manual redeploy/rollback only. The automatic path -- deploy on every
+# real push to develop -- lives directly in ci.yml's `deploy` job now,
+# not here. This file originally listened for `workflow_run` (fires when
+# "CI" finishes on develop) and had its own `deploy-auto` job, but GitHub
+# only registers workflow_run/workflow_dispatch triggers from whatever's
+# on the repository's DEFAULT branch, confirmed by a real test: even
+# after CI ran successfully on develop, `gh run list --workflow
+# deploy-develop.yml` still 404'd, because this file had only ever been
+# merged into develop, not main (and the team's default branch stays
+# main on purpose, not develop -- see the README for the full reasoning).
+# Rather than force a main sync just to keep that path alive, deploy was
+# moved into ci.yml directly, which was already registered and already
+# triggers correctly.
+#
+# What's left here is genuinely distinct from ci.yml's deploy job and
+# worth keeping: redeploying one specific service on demand, optionally
+# pinned to an exact image digest instead of the latest build -- e.g. to
+# roll back to a known-good image without needing a new commit.
+#
+# IMPORTANT: if develop -> main ever gets synced for some other reason,
+# do not re-add a workflow_run trigger here without first removing
+# ci.yml's `deploy` job (or vice versa) -- running both would double
+# ECS-deploy every service on every push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: "Service to (re)deploy"
+        required: true
+        type: choice
+        options: [booking, connect, engine-auth, terminology, engine]
+      image_digest:
+        description: "Immutable digest to deploy (e.g. sha256:...) -- redeploys the latest develop-<sha> tag if left blank"
+        required: false
+        type: string
+        default: ""
+      skip_smoke_test:
+        required: false
+        type: boolean
+        default: false
+
+# Explicit, not left to the repo/org default: reusable-ecs-deploy.yml's job
+# requests id-token: write (AWS OIDC) and contents: read (checkout). A
+# caller's top-level permissions are a hard ceiling on what a reusable
+# workflow it calls can request -- omitting id-token: write here causes
+# GitHub to reject the whole workflow at startup, not just that job (see
+# ci.yml's permissions block for how this was diagnosed).
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy-manual:
+    name: Deploy ${{ inputs.service }} (manual)
+    uses: ./.github/workflows/reusable-ecs-deploy.yml
+    with:
+      environment: develop
+      service: ${{ inputs.service }}
+      image_tag: ${{ inputs.image_digest == '' && format('develop-{0}', github.sha) || '' }}
+      image_digest: ${{ inputs.image_digest }}
+      skip_smoke_test: ${{ inputs.skip_smoke_test }}
+    secrets: inherit

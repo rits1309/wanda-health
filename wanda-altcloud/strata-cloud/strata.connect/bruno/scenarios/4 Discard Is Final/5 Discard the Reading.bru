@@ -1,0 +1,31 @@
+meta {
+  name: 5 Discard the Reading
+  type: http
+  seq: 5
+}
+
+post {
+  url: {{baseUrl}}/v1/dev/quarantine-discard
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "correlation_id": "{{scn4Correlation}}"
+  }
+}
+
+tests {
+  test("200 — the record closes as never-to-be-processed", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().correlation_id).to.equal(bru.getVar("scn4Correlation"));
+    expect(res.getBody().quarantine_id).to.be.a("string").and.not.be.empty;
+  });
+}
+
+docs {
+  The mirror of `inv quarantine-discard --correlation-id <id>`. Discard is terminal
+  for the whole correlation: it also cancels the replay entry request 4 enqueued,
+  so the suppressed reading cannot process later.
+}

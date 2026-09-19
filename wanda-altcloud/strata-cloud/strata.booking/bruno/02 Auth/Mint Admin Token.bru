@@ -1,0 +1,38 @@
+meta {
+  name: Mint Admin Token
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/v1/dev/tokens
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "sub": "a-1",
+    "role": "admin",
+    "programme_ids": [
+      "p-1",
+      "p-2"
+    ]
+  }
+}
+
+script:post-response {
+  if (res.getStatus() === 200) {
+    bru.setEnvVar("adminToken", res.getBody().access_token);
+  }
+}
+
+tests {
+  test("returns 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Dev-mode token for the seeded identity — saved to {{adminToken}}. Requires STRATA_DEV_MODE=true (never AWS).
+}

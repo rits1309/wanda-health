@@ -1,0 +1,35 @@
+meta {
+  name: 4 Discard Is Final
+}
+
+docs {
+  # Scenario 4 — Discard Is Final, Even Against an Earlier Replay
+
+  Discard is the operator's "this must never be processed" exit from the quarantine
+  worklist — and it must hold at EVERY surface, not just when a replay is requested.
+  This scenario walks the exact sequence the epic-gate review found bypassing it:
+  replay first (allowed — the record is still open), discard second. The already-
+  enqueued replay message must die with the record: nothing lands, no worklist entry
+  resurrects, and later replays are refused. Run in order; nothing to fill in
+  (request 1 generates a fresh device id per run, so the scenario repeats cleanly).
+
+  1. A blood pressure reading from a device nobody registered — captured, 202
+  2. Run the pipeline — the reading quarantines (unregistered device)
+  3. GET the worklist — the record is there, open
+  4. Replay it — ALLOWED (202): the record is still open at this point
+  5. Discard it — the record closes as never-to-be-processed, and the pending
+     replay entry is cancelled with it
+  6. Run the pipeline — nothing processes into a reading: the replay died at step 5
+     (a racing claim would be dropped by the Processor's own discard check instead)
+  7. GET the worklist — clear; no resurrected open record
+  8. Replay again — REFUSED (409): discard is final in Phase 1
+
+  The CLI equivalents of 4/5 are `inv replay --correlation-id <id>` and
+  `inv quarantine-discard --correlation-id <id>`.
+
+  Verify (optional):
+  psql: SELECT state FROM quarantined_readings ORDER BY created_at DESC LIMIT 1;
+  — `discarded`, and it stays the only record for the correlation;
+  SELECT state, last_error FROM reading_queue ORDER BY created_at DESC LIMIT 1;
+  — the cancelled replay entry: `done`, "cancelled: correlation discarded".
+}

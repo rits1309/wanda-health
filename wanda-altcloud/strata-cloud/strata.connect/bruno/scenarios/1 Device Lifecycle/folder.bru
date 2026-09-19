@@ -1,0 +1,22 @@
+meta {
+  name: 1 Device Lifecycle
+}
+
+docs {
+  # Scenario 1 — Device Lifecycle (b/c)
+
+  Run the requests in order, nothing to fill in: members are the deterministic demo
+  cast (m-1 Morgan Lee, m-2 Sam Carter — seeded by `../strata.core`'s demo profile),
+  and request 1 generates a fresh device id per run so the scenario is repeatable.
+
+  1. Register the device to Member m-1 — a new active mapping (201, nothing superseded)
+  2. Send the identical registration again — idempotent: the same mapping id comes back
+  3. Register the same device to m-2 — supersede: m-1's mapping is ended (kept for
+     audit), the response names the superseded member
+  4. No API key — rejected, nothing created
+
+  Verify the audit trail (optional):
+  psql: SELECT user_id, external_id, ended_at FROM user_external_ids
+        WHERE external_id LIKE 'SM-SCN1-%' ORDER BY registered_at;
+  — m-1's row survives with ended_at set; m-2's row is the active one (ended_at NULL).
+}

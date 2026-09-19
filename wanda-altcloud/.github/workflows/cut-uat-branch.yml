@@ -1,0 +1,134 @@
+name: Cut UAT Branch
+
+# Manual only, and the only place a uat/** branch is ever created. The
+# content promoted is always develop's, no exceptions, no ref override
+# input. That is the entire enforcement of "no direct push from a feature
+# branch to uat".
+#
+# The PR this opens is a real develop -> uat/** pull request: head is
+# develop itself, base is the branch cut below. There is no throwaway
+# promote/** branch any more.
+#
+# Making that possible dictates how the branch is cut, so this is worth
+# understanding before changing it. GitHub refuses to open a PR with zero
+# commits between base and head (confirmed by a real run: "No commits
+# between <uat branch> and develop"). An earlier version created
+# uat/<date>-<sha> as an exact copy of develop's tip, which left the PR
+# with nothing to merge -- hence the throwaway promote/** branch carrying
+# one empty commit purely to give the PR a diff.
+#
+# So the new branch starts from the last commit the PREVIOUS uat/** branch
+# and develop have in common (their merge-base), not from develop's tip and
+# not from the previous branch's own tip. The PR's diff is then everything
+# develop gained since the last promotion -- a real, reviewable change set.
+#
+# Why the merge-base rather than the previous branch's tip, which an earlier
+# version used: the merge-base is by definition an ancestor of develop, so
+# merging the PR produces exactly develop's tree. Nothing committed straight
+# onto an old uat branch can ride along into the new one, and the PR can
+# never conflict. Cutting from the previous tip inherited everything on it,
+# and that went wrong for real: an obsolete ci-release.yml, committed onto a
+# release branch and merged back into uat branches while resolving a
+# conflict in the web editor, spread silently into every later branch and
+# ran migrations against the production database.
+#
+# The consequence to keep in mind: between being cut and its PR merging,
+# a uat/** branch still holds OLDER code. Two things follow. First,
+# deploy-uat.yml must not deploy on the branch-creation push, or it would roll
+# UAT back -- its actor guard (github.actor != 'github-actions[bot]') is
+# what prevents that, and is load-bearing rather than cosmetic. Second, only
+# cut a release from a uat/** branch whose PR has already merged;
+# cut-releases-branch.yml enforces that by selecting on deploy-uat.yml's deploy
+# tag.
+#
+# Merging the PR is what actually rebuilds and deploys to uat, via
+# deploy-uat.yml's push trigger -- which deploys only the latest uat branch, so
+# the PR this run opens supersedes any older promotion PR still open.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  cut-branch:
+    name: Cut uat/** branch + open PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Cut branch and open the promotion PR
+        # PROMOTION_PAT, not GITHUB_TOKEN, for the gh pr create below. This
+        # enterprise forbids the default Actions token from creating or
+        # approving pull requests ("GitHub Actions is not permitted to
+        # create or approve pull requests" -- confirmed live in this repo
+        # and in summit, and the repo-level setting can't override it: the
+        # API returns 409 "The enterprise does not allow..."). Falls back to
+        # GITHUB_TOKEN so branch creation still works and so this starts
+        # working on its own if that policy is ever lifted.
+        env:
+          GH_TOKEN: ${{ secrets.PROMOTION_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          SHA="$(git rev-parse HEAD)"
+          SUFFIX="$(date -u +%Y-%m-%d)-$(git rev-parse --short HEAD)"
+          UAT_BRANCH="uat/$SUFFIX"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Most recent by commit date rather than by name: branch names carry
+          # a date but sort unreliably once several are cut on the same day.
+          PREV_UAT="$(git for-each-ref --sort=-committerdate \
+            --format='%(refname:short)' 'refs/remotes/origin/uat/*' | head -n1)"
+
+          if [ -z "$PREV_UAT" ]; then
+            # Nothing to diff against on the very first promotion, so there
+            # is no PR to open -- the branch simply starts at develop.
+            git branch "$UAT_BRANCH" HEAD
+            git push origin "$UAT_BRANCH"
+            echo "::notice::No previous uat/** branch exists, so $UAT_BRANCH was cut at develop's tip and no PR was opened -- there would be nothing to review. Every later promotion opens a real develop -> uat/** PR."
+            exit 0
+          fi
+
+          # Where the previous promotion and develop last agreed. An ancestor
+          # of develop, so the merged result is exactly develop (see header).
+          BASE_SHA="$(git merge-base "$PREV_UAT" "$SHA")"
+
+          # Refuse to cut a promotion that would promote nothing. Without
+          # this the run would fail later and less clearly, on gh pr create
+          # rejecting a zero-commit PR.
+          AHEAD="$(git rev-list --count "$BASE_SHA..$SHA")"
+          if [ "$AHEAD" -eq 0 ]; then
+            echo "::error::develop has no commits beyond $PREV_UAT, so there is nothing to promote to UAT. Merge something into develop first."
+            exit 1
+          fi
+
+          if [ "$(git rev-list --count "$SHA..$PREV_UAT")" -gt 0 ]; then
+            echo "::notice::$PREV_UAT carries commits develop never had. They are left behind: $UAT_BRANCH starts from $(git rev-parse --short "$BASE_SHA"), where $PREV_UAT and develop last agreed, so this promotion is exactly develop."
+          fi
+
+          echo "Cutting $UAT_BRANCH at $(git rev-parse --short "$BASE_SHA") ($AHEAD commit(s) to promote from develop since $PREV_UAT)"
+          git branch "$UAT_BRANCH" "$BASE_SHA"
+          git push origin "$UAT_BRANCH"
+
+          # The branch exists regardless of what happens next, so a
+          # PR-creation failure is recoverable by hand rather than leaving
+          # a half-cut promotion behind.
+          if gh pr create \
+            --base "$UAT_BRANCH" \
+            --head develop \
+            --title "Promote develop ($SHA) to UAT" \
+            --body "Opened by cut-uat-branch.yml: a real develop -> \`$UAT_BRANCH\` pull request, showing the $AHEAD commit(s) develop gained since the last promotion (\`$PREV_UAT\`). Merging it rebuilds and deploys to uat -- see deploy-uat.yml, which deploys only the latest uat branch. Until it merges this branch still holds older code, so it cannot be released yet."
+          then
+            echo "Opened PR: develop -> $UAT_BRANCH"
+          else
+            echo "::error::Cut $UAT_BRANCH successfully, but could not open the promotion PR. If this is a token problem, add or fix the PROMOTION_PAT repository secret -- the default Actions token cannot create pull requests in this enterprise, and a fine-grained token must name the Wanda-Health org as its resource owner (a classic token with 'repo' scope works too). Nothing is lost meanwhile -- open the PR by hand at: ${{ github.server_url }}/${{ github.repository }}/compare/$UAT_BRANCH...develop"
+            exit 1
+          fi

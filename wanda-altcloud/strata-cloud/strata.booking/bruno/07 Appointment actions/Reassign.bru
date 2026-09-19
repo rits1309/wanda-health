@@ -1,0 +1,31 @@
+meta {
+  name: Reassign
+  type: http
+  seq: 6
+}
+
+post {
+  url: {{baseUrl}}/v1/appointments/{{appointmentId}}/reassign
+  body: json
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{coachToken}}
+}
+
+body:json {
+  {
+    "slot_id": "{{reassignSlotId}}"
+  }
+}
+
+tests {
+  test("returns 204", function () {
+    expect(res.getStatus()).to.equal(204);
+  });
+}
+
+docs {
+  Same-time coach handover: time, member, and status unchanged; member notified per programme config; AppointmentReassigned emitted.
+}

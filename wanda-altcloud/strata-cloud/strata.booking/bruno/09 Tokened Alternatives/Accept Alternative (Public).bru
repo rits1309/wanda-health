@@ -1,0 +1,27 @@
+meta {
+  name: Accept Alternative (Public)
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/v1/alternatives/accept
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "token": "{{alternativeToken}}"
+  }
+}
+
+tests {
+  test("200 books it, 409 if the slot has since gone", function () {
+    expect([200, 409]).to.include(res.getStatus());
+  });
+}
+
+docs {
+  Accept books the suggested slot for the member (one-shot). Graceful 409 points back to the booking page when another member got there first.
+}

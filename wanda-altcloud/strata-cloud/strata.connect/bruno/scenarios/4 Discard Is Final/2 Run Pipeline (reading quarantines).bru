@@ -1,0 +1,18 @@
+meta {
+  name: 2 Run Pipeline (reading quarantines)
+  type: http
+  seq: 2
+}
+
+post {
+  url: {{baseUrl}}/v1/dev/pipeline/run
+  body: none
+  auth: none
+}
+
+tests {
+  test("one message handled — the unregistered reading quarantines ", function {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().processed).to.be.at.least(1);
+  });
+}

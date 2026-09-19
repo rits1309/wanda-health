@@ -1,0 +1,50 @@
+name: Core · Quality
+
+# strata.core is one subproject in this multi-service repo; scope CI to it by path
+# so unrelated changes (strata.engine, strata.booking) don't trigger this run.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "strata.core/**"
+      - ".github/workflows/core-quality.yml"
+  pull_request:
+    paths:
+      - "strata.core/**"
+      - ".github/workflows/core-quality.yml"
+
+jobs:
+  quality:
+    name: lint · types · security
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The library lives in the strata.core/ subfolder; run every step from there.
+    defaults:
+      run:
+        working-directory: strata.core
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: strata.core/pyproject.toml
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Ruff lint
+        run: ruff check --output-format=github .
+
+      - name: Ruff format check
+        run: ruff format --check .
+
+      - name: mypy (strict)
+        run: mypy strata_core tests
+
+      - name: bandit (SAST)
+        run: bandit -q -c pyproject.toml -r strata_core
+
+      - name: pip-audit (dependency CVEs)
+        run: pip-audit --skip-editable

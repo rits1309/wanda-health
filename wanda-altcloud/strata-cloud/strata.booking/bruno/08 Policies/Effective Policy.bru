@@ -1,0 +1,27 @@
+meta {
+  name: Effective Policy
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/v1/cancellation-policies/effective?programme_id=p-1&coach_id=c-2
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{adminToken}}
+}
+
+tests {
+  test("returns 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+  test("coach override wins", function () {
+    expect(res.getBody().source).to.equal("coach");
+  });
+}
+
+docs {
+  Precedence proof: seed gives p-1 a 24h/both policy and c-2 a 48h/coach-only override — the override wins.
+}

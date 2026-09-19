@@ -1,0 +1,168 @@
+name: Reusable - Run Migrations
+
+# Called only, from ci.yml (develop) and deploy-uat.yml (uat) after
+# build-scan-push, before deploy -- migrations apply against the
+# freshly-built image's schema expectations before any service starts
+# using it, not after.
+#
+# strata-core is a library every service depends on, not one of the 5
+# deployed services in the shared `services` matrix -- it deliberately
+# doesn't go through reusable-ecs-deploy.yml (there's no ECS *service* for
+# it, no persistent thing to keep stable) or the full
+# reusable-build-scan-push.yml treatment (Trivy/Grype/SBOM/Cosign): it
+# never serves traffic, it's an ephemeral one-off task run once per
+# deploy, a materially smaller risk surface. Builds its own small image
+# and registers a fresh revision of modules/compute/ecs's Terraform-owned
+# "migration" task definition (which existed but was never actually wired
+# to anything -- confirmed by a real failure: its bootstrap-placeholder
+# image was never pushed to ECR, and separately, UAT's database had never
+# been migrated at all, "relation user_profiles does not exist").
+#
+# Network config is borrowed from the engine-auth service (same shared
+# private subnets + security group as every service in this module) --
+# there's no ECS service for migrations to ask directly.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "develop, uat or prod"
+        required: true
+        type: string
+      image_tag:
+        description: "Tag to build+push, matching build-scan-push's own tag for this run"
+        required: true
+        type: string
+      ref:
+        description: "Commit to build the migration image from. Empty means the commit that triggered the run. deploy-release.yml passes the release commit it resolved, since it is dispatched from develop."
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  migrate:
+    name: Run migrations (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Build strata-core image
+        run: |
+          echo "Building strata-core from $(git rev-parse HEAD)"
+          docker build \
+            -f strata-cloud/strata.core/Dockerfile \
+            -t strata-core:${{ github.sha }} \
+            strata-cloud/
+
+      # Dedicated build role, same one reusable-build-scan-push.yml uses --
+      # ECR push only, no ECS/task-def permissions.
+      - name: Configure AWS credentials (OIDC, build role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_BUILD_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Push image
+        id: push
+        env:
+          ECR_IMAGE_PATH: ${{ vars.ECR_REGISTRY_CORE }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          FULL_IMAGE="${ECR_IMAGE_PATH}:${IMAGE_TAG}"
+          REPO_NAME="${ECR_IMAGE_PATH##*/}"
+
+          # Idempotent: a re-run of the same commit computes the same
+          # <ref>-<sha> tag, and ECR repos here are immutable-tag --
+          # re-pushing an existing tag is rejected outright ("tag invalid
+          # ... cannot be overwritten"), confirmed by a real rerun. Same
+          # content would be pushed anyway (identical sha), so skip
+          # pushing when the tag already exists rather than fail the job.
+          if aws ecr describe-images --repository-name "$REPO_NAME" --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+            echo "Tag $IMAGE_TAG already exists in $REPO_NAME -- skipping push (rerun of the same commit)."
+            echo "full_image=$FULL_IMAGE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          docker tag strata-core:${{ github.sha }} "$FULL_IMAGE"
+          docker push "$FULL_IMAGE"
+          echo "full_image=$FULL_IMAGE" >> "$GITHUB_OUTPUT"
+
+      # Separate role for the ECS-side operations -- same one
+      # reusable-provision-users.yml uses.
+      - name: Configure AWS credentials (OIDC, deploy role)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          audience: sts.amazonaws.com
+          role-session-name: GitHubActionsMigrate
+
+      # Fetch the CURRENT migration task definition (Terraform-registered,
+      # bootstrap-image placeholder) purely to reuse everything except the
+      # image -- role ARNs, cpu/memory, log config -- same pattern as
+      # reusable-ecs-deploy.yml's own "Fetch latest task definition" step.
+      - name: Register a new migration task definition revision
+        id: register
+        env:
+          FAMILY: wandahealth-${{ inputs.environment }}-migration
+          IMAGE: ${{ steps.push.outputs.full_image }}
+        run: |
+          set -euo pipefail
+          aws ecs describe-task-definition --task-definition "$FAMILY" \
+            --query 'taskDefinition' > raw-task-definition.json
+          jq --arg image "$IMAGE" \
+            'del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy) | .containerDefinitions[0].image = $image' \
+            raw-task-definition.json > new-task-definition.json
+
+          NEW_ARN=$(aws ecs register-task-definition \
+            --cli-input-json file://new-task-definition.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          echo "task_def_arn=$NEW_ARN" >> "$GITHUB_OUTPUT"
+
+          CONTAINER_NAME=$(jq -r '.containerDefinitions[0].name' new-task-definition.json)
+          echo "container_name=$CONTAINER_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Run migrations as a one-off task
+        env:
+          CLUSTER: wandahealth-${{ inputs.environment }}-cluster
+          AUTH_SERVICE: ${{ vars.ECS_SERVICE_AUTH }}
+          TASK_DEF_ARN: ${{ steps.register.outputs.task_def_arn }}
+          CONTAINER: ${{ steps.register.outputs.container_name }}
+        run: |
+          set -euo pipefail
+          aws ecs describe-services --cluster "$CLUSTER" --services "$AUTH_SERVICE" \
+            --query 'services[0].networkConfiguration' --output json > network-config.json
+
+          TASK_ARN=$(aws ecs run-task \
+            --cluster "$CLUSTER" \
+            --task-definition "$TASK_DEF_ARN" \
+            --launch-type FARGATE \
+            --network-configuration "file://network-config.json" \
+            --query 'tasks[0].taskArn' --output text)
+          echo "Started migration task: $TASK_ARN (task def: $TASK_DEF_ARN)"
+
+          aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN"
+
+          EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+            --query 'tasks[0].containers[0].exitCode' --output text)
+          echo "alembic upgrade head exit code: $EXIT_CODE"
+
+          LOG_GROUP=$(aws ecs describe-task-definition --task-definition "$TASK_DEF_ARN" \
+            --query 'taskDefinition.containerDefinitions[0].logConfiguration.options."awslogs-group"' --output text)
+          TASK_ID="${TASK_ARN##*/}"
+          echo "Logs: aws logs tail \"$LOG_GROUP\" --log-stream-names \"migration/$CONTAINER/$TASK_ID\""
+
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::Migration failed (exit $EXIT_CODE) -- see the log command above."
+            exit 1
+          fi

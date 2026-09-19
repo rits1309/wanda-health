@@ -1,0 +1,20 @@
+meta {
+  name: List Patterns
+  type: http
+  seq: 2
+}
+
+get {
+  url: {{baseUrl}}/v1/availability-patterns
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{coachToken}}
+}
+
+tests {
+  test("returns 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}

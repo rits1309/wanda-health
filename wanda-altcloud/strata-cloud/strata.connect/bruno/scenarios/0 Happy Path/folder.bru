@@ -1,0 +1,29 @@
+meta {
+  name: 0 Happy Path
+}
+
+docs {
+  # Scenario 0 — Happy Path (2.1a, 2.2a, 3.1a/b)
+
+  The whole pipeline, end to end: a device is registered at dispatch, delivers a
+  reading, and the reading lands in Strata.Core attributed to the right Member — with
+  its business event captured in the transactional outbox. Then the provider re-sends
+  the same reading and NOTHING duplicates. Run in order; nothing to fill in (request 1
+  generates a fresh device id and provider reading id per run, so it repeats forever).
+
+  1. Register the device to Member m-1 (the demo cast's Morgan Lee)
+  2. Deliver a weight reading from that device — captured, 202
+  3. Run the pipeline — the reading is validated, attributed to m-1, and persisted
+  4. The provider re-sends the SAME reading (same reading_id, new delivery) — 202 again
+  5. Run the pipeline — the duplicate is recognised and acknowledged, nothing written
+
+  Verify (optional):
+  psql: SELECT user_id, weight_kg, weight_lbs, suspect, provider_reading_id
+        FROM weight_readings ORDER BY created_at DESC LIMIT 3;
+  — exactly ONE row for this run's provider_reading_id, user m-1, suspect false,
+  both unit systems exactly as sent.
+  psql: SELECT event_type, published_at, payload->>'reading_row_id' FROM readings_outbox_events
+        ORDER BY created_at DESC LIMIT 3;
+  — exactly one reading.received event for it, published_at NULL (the Elevate relay
+  is gated on).
+}

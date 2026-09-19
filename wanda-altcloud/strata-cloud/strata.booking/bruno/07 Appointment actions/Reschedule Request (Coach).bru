@@ -1,0 +1,24 @@
+meta {
+  name: Reschedule Request (Coach)
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{baseUrl}}/v1/appointments/{{appointmentId}}/reschedule-request
+  auth: none
+}
+
+headers {
+  Authorization: Bearer {{coachToken}}
+}
+
+tests {
+  test("returns 200", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}
+
+docs {
+  Coach-initiated: mints a time-limited link token (TTL per programme) and emails the member. Fetch Dev → List Notifications next — its post-script extracts {{rescheduleToken}} from the link.
+}

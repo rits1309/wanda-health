@@ -1,0 +1,83 @@
+[project]
+name = "strata-identity"
+version = "0.1.0"
+description = "The identity-logic library for Savanna — the token-verification seam, identity wire types, and the profile/role helpers implementing the Cognito sync rule; models and migrations live in strata-core (as amended by)."
+requires-python = ">=3.13"
+dependencies = [
+    "pydantic>=2.9",
+    "sqlalchemy[asyncio]>=2.0",  # the profile/role helpers take AsyncSession
+    "strata-core",  # the canonical models + migration history (local path dep)
+    "fastapi>=0.115",            # the seam ships FastAPI dependencies (AuthSeam)
+    "pyjwt[crypto]>=2.8",        # RS256 (Cognito JWKS) + HS256 (dev) verification
+]
+
+[project.optional-dependencies]
+# Everything needed to test, lint, type-check, and security-scan the project.
+# Install with:  pip install -e ".[dev]"
+dev = [
+    "pytest>=8.3",
+    "pytest-cov>=5.0",
+    "pytest-randomly>=3.15",  # random suite order every run: order-coupling fails loudly
+    "anyio>=4.4",                     # async test backend
+    "httpx>=0.27",                    # Starlette TestClient for the guard tests
+    "testcontainers[postgres]>=4.0",  # ephemeral Postgres for DB-touching tests
+    "invoke>=2.0",                    # task runner (tasks.py)
+    "ruff>=0.7",                      # lint + format
+    "mypy>=1.11",                     # static type checking
+    "bandit>=1.7",                    # SAST security linter
+    "pip-audit>=2.7",                 # dependency CVE scanner
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["strata_identity*"]
+
+[tool.setuptools.package-data]
+# The package is fully typed (mypy strict); consumers' type-checkers rely on this.
+strata_identity = ["py.typed"]
+
+# ---------------------------------------------------------------------------
+# Tool config — kept here so pyproject.toml is the single source of truth.
+# ---------------------------------------------------------------------------
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: needs Docker (testcontainers Postgres); deselect with -m 'not integration'",
+]
+
+[tool.coverage.run]
+source = ["strata_identity"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+# pycodestyle, pyflakes, isort, pyupgrade, flake8-bugbear, simplify.
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+plugins = ["pydantic.mypy"]
+# strata-core is installed editable (PEP 660 import hooks mypy can't follow);
+# resolve it from source instead.
+mypy_path = "../strata.core"
+
+[[tool.mypy.overrides]]
+# testcontainers ships no type stubs / py.typed marker.
+module = "testcontainers.*"
+ignore_missing_imports = true
+
+[tool.bandit]
+# The test tree is allowed to use asserts and fixtures freely.
+exclude_dirs = ["tests", ".venv"]

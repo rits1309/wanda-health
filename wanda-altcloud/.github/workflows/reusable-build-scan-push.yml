@@ -1,0 +1,353 @@
+name: Reusable - Build, Scan & Push
+
+# Called only, after both reusable-app-tests.yml and reusable-secops-scan.yml
+# have passed. Per-service matrix: docker build -> Trivy image scan + Grype
+# -> CycloneDX SBOM -> a per-service gate check -> push to ECR, tagged
+# <branch>-<sha> (immutable) -> Cosign sign. Push happens before sign
+# deliberately -- Cosign signs a pushed registry digest, not a local Docker
+# image ID, so signing can't come before the push despite the label order in
+# the blueprint's file-tree comment ("...sbom · cosign · ECR push").
+#
+# AWS/ECR credentials come from the caller's `environment` input, resolved
+# to a real GitHub Environment (develop/uat) so vars.*/secrets.* are scoped
+# correctly. develop builds once per commit and every later stage that
+# stays in develop's own AWS account reuses that same <branch>-<sha> tag
+# (deploy-develop.yml). uat is a separate AWS account with its own ECR --
+# no cross-account pull is set up, so deploy-uat.yml calls this job again
+# with an explicit `image_tag` (uat-<sha>) to produce uat's own copy of the
+# image in its own registry, rather than reusing develop's.
+
+on:
+  workflow_call:
+    inputs:
+      services:
+        description: "JSON array of service keys to build"
+        required: true
+        type: string
+      environment:
+        description: "GitHub Environment to pull AWS/ECR vars from (develop or uat)"
+        required: true
+        type: string
+      image_tag:
+        description: "Explicit tag to push as, e.g. uat-<sha>. deploy-uat.yml passes this explicitly (uat-<github.sha>) so deploy-release.yml can find the exact image uat tested by its commit, rather than the automatic <ref_name>-<sha> computation (which would produce an ugly, doubly-identifying tag off a uat/<date>-<shortsha> branch name)."
+        required: false
+        type: string
+        default: ""
+
+# Neither Trivy (image) nor Grype fails its own job on a finding --
+# deliberately, so a genuine tool crash is never confused with "this
+# scanner found something" (see reusable-secops-scan.yml's identical
+# reasoning). Both run once now (previously Trivy ran twice: a
+# CRITICAL-only blocking pass plus a separate full-severity report-only
+# pass) and always exit clean; findings feed two separate gates instead:
+# the "Enforce image security gate before push" step below, per service,
+# which is what actually stops THIS image being pushed/signed at all; and
+# the later centralized gate in reusable-notify.yml, which sums every
+# tool's findings across the whole run (including Semgrep/CodeQL/Trivy-fs
+# from earlier) and is what stops an already-pushed-and-signed image from
+# ever being migrated into or deployed.
+env:
+  TRIVY_IGNORE_UNFIXED: "true"
+
+jobs:
+  build-scan-push:
+    name: ${{ matrix.service }}
+    if: inputs.services != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(inputs.services) }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # var_key feeds the per-service ECR_REGISTRY_<KEY> Environment
+      # variable lookup below -- e.g. booking -> BOOKING, engine-auth -> AUTH.
+      # This key is just this pipeline's own internal shorthand, unrelated to
+      # the actual repo name stored in that variable's value -- develop's
+      # ECR_REGISTRY_AUTH, for instance, points at the real
+      # wandahealth-develop-strata-engine-auth repo (Terraform-managed, see
+      # wanda-altcloud-infra-code's modules/compute/ecr), not "strata/auth".
+      # Each service needs its own ECR repo (created ahead of time in AWS,
+      # not managed by this pipeline) because one shared repo can't hold
+      # five unrelated images under one name.
+      - name: Resolve service metadata
+        id: meta
+        run: |
+          case "${{ matrix.service }}" in
+            booking)      DIR="strata.booking";     VAR_KEY="BOOKING" ;;
+            connect)      DIR="strata.connect";      VAR_KEY="CONNECT" ;;
+            engine-auth)  DIR="strata.engine.auth";   VAR_KEY="AUTH" ;;
+            terminology)  DIR="strata.terminology";   VAR_KEY="TERMINOLOGY" ;;
+            engine)       DIR="strata.engine";        VAR_KEY="ENGINE" ;;
+            *) echo "::error::Unknown service key '${{ matrix.service }}'"; exit 1 ;;
+          esac
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "var_key=$VAR_KEY" >> "$GITHUB_OUTPUT"
+
+          if [ -n "${{ inputs.image_tag }}" ]; then
+            echo "image_tag=${{ inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+          else
+            # Docker tags can't contain "/", but branch names like
+            # feature/application-ci-cd do -- sanitize before using ref_name
+            # as part of the immutable <ref>-<sha> tag.
+            SAFE_REF="$(echo "${{ github.ref_name }}" | tr '/' '-')"
+            echo "image_tag=${SAFE_REF}-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Build context is strata-cloud/ (repository root for the Dockerfiles),
+      # not the service folder -- each Dockerfile COPYs strata.core and
+      # strata.identity in from alongside it. See the comment at the top of
+      # strata-cloud/${{ steps.meta.outputs.dir }}/Dockerfile.
+      - name: Build image
+        run: |
+          docker build \
+            -f strata-cloud/${{ steps.meta.outputs.dir }}/Dockerfile \
+            -t ${{ matrix.service }}:${{ github.sha }} \
+            strata-cloud/
+
+      - name: Trivy image scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          # See reusable-secops-scan.yml for the full reasoning: real tag
+          # (not `latest`, which is rejected), and an authenticated token so
+          # the binary download isn't subject to the anonymous GitHub API
+          # rate limit that was failing these steps intermittently.
+          version: v0.74.0
+          token-setup-trivy: ${{ secrets.GITHUB_TOKEN }}
+          image-ref: ${{ matrix.service }}:${{ github.sha }}
+          ignore-unfixed: ${{ env.TRIVY_IGNORE_UNFIXED }}
+          format: sarif
+          output: trivy-image-${{ matrix.service }}.sarif
+          exit-code: "0"
+
+      - name: Upload Trivy image report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-sarif-${{ matrix.service }}
+          path: trivy-image-${{ matrix.service }}.sarif
+          if-no-files-found: warn
+
+      - name: Generate human-readable Trivy image report
+        if: always()
+        run: |
+          python3 .devsecops/report-template/normalize_sarif.py \
+            --tool "Trivy (image)" --out trivyimg-findings.json trivy-image-${{ matrix.service }}.sarif
+          python3 .devsecops/report-template/render_report.py \
+            --tool "Trivy (image)" --title "Trivy Image Report - ${{ matrix.service }}" --data trivyimg-findings.json \
+            --out trivy-image-report-${{ matrix.service }}.html
+
+      # ignore-unfixed above already means every finding here has a fix
+      # available -- see reusable-secops-scan.yml's Semgrep "Annotate"
+      # step for why this is a workflow-command annotation, not a SARIF
+      # upload.
+      - name: Annotate Trivy image findings
+        if: always()
+        run: |
+          python3 .devsecops/report-template/emit_annotations.py \
+            --tool "Trivy (image)" --data trivyimg-findings.json \
+            --blocking-severities critical,high --service "${{ matrix.service }}"
+
+      - name: Upload Trivy image HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-html-report-${{ matrix.service }}
+          path: trivy-image-report-${{ matrix.service }}.html
+          if-no-files-found: warn
+
+      - name: Generate CycloneDX SBOM
+        if: always()
+        uses: aquasecurity/trivy-action@master
+        with:
+          version: v0.74.0
+          token-setup-trivy: ${{ secrets.GITHUB_TOKEN }}
+          image-ref: ${{ matrix.service }}:${{ github.sha }}
+          format: cyclonedx
+          output: sbom-${{ matrix.service }}-${{ github.sha }}.json
+
+      - name: Upload SBOM
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-${{ matrix.service }}-${{ github.sha }}
+          path: sbom-${{ matrix.service }}-${{ github.sha }}.json
+          if-no-files-found: warn
+
+      - name: Generate human-readable SBOM report
+        if: always()
+        env:
+          SBOM_FILE: sbom-${{ matrix.service }}-${{ github.sha }}.json
+        run: |
+          if [ ! -f "$SBOM_FILE" ]; then
+            echo "No SBOM file found, skipping HTML report."
+            exit 0
+          fi
+          python3 .devsecops/report-template/normalize_sbom.py \
+            --tool SBOM --out sbom-findings.json "$SBOM_FILE"
+          python3 .devsecops/report-template/render_report.py \
+            --tool SBOM --title "SBOM Report - ${{ matrix.service }}" --data sbom-findings.json \
+            --out sbom-report-${{ matrix.service }}.html
+
+      - name: Upload SBOM HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-html-report-${{ matrix.service }}
+          path: sbom-report-${{ matrix.service }}.html
+          if-no-files-found: warn
+
+      # only-fixed: true to match Trivy's ignore-unfixed policy above.
+      # fail-build: false -- never fails its own job on a finding, same
+      # reasoning as Trivy image above; the centralized security gate in
+      # reusable-notify.yml is what actually decides pass/fail.
+      # A repo-root .grype.yaml (a small, justified ignore list -- see
+      # its own comments) suppresses the base image's Python-runtime CVEs
+      # that Grype's nvd:cpe matcher only "fixes" by pointing at a
+      # pre-release of an unrelated future Python major version -- not a
+      # real applicable patch. Not passed as this action's own `config`
+      # input -- a real run proved that input isn't actually wired into
+      # the grype CLI invocation this action makes (no --config flag, no
+      # GRYPE_CONFIG env var in the job log, despite the input being
+      # logged). Grype auto-discovers .grype.yaml from the working
+      # directory on its own, which this job's default working directory
+      # (the repo root) already satisfies. Everything else Grype finds
+      # still counts toward the aggregate gate.
+      - name: Grype vulnerability scan
+        id: grype
+        uses: anchore/scan-action@v6
+        with:
+          image: ${{ matrix.service }}:${{ github.sha }}
+          fail-build: false
+          only-fixed: true
+
+      - name: Upload Grype report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grype-sarif-${{ matrix.service }}
+          path: ${{ steps.grype.outputs.sarif }}
+          if-no-files-found: warn
+
+      - name: Generate human-readable Grype report
+        if: always()
+        run: |
+          python3 .devsecops/report-template/normalize_sarif.py \
+            --tool Grype --out grype-findings.json "${{ steps.grype.outputs.sarif }}"
+          python3 .devsecops/report-template/render_report.py \
+            --tool Grype --title "Grype Report - ${{ matrix.service }}" --data grype-findings.json \
+            --out grype-report-${{ matrix.service }}.html
+
+      # only-fixed above already means every finding here has a fix
+      # available -- see reusable-secops-scan.yml's Semgrep "Annotate"
+      # step for why this is a workflow-command annotation, not a SARIF
+      # upload.
+      - name: Annotate Grype findings
+        if: always()
+        run: |
+          python3 .devsecops/report-template/emit_annotations.py \
+            --tool Grype --data grype-findings.json \
+            --blocking-severities critical,high --service "${{ matrix.service }}"
+
+      - name: Upload Grype HTML report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grype-html-report-${{ matrix.service }}
+          path: grype-report-${{ matrix.service }}.html
+          if-no-files-found: warn
+
+      # Per the sign-off: "image signed and pushed to ECR only if the
+      # above pass" -- Trivy (image) and Grype above deliberately don't
+      # fail their own job on a finding (so a genuine tool crash is never
+      # confused with "found something"), which means without a step like
+      # this, push+sign below would run unconditionally regardless of
+      # what those two scanners found. Checked here, per service, before
+      # any AWS credential or push step -- not left to the later
+      # aggregate gate in reusable-notify.yml, which only stops
+      # migrate/deploy from using an already-pushed-and-signed image, not
+      # the push/sign themselves.
+      #
+      # Both scanners already ran with ignore-unfixed/only-fixed above
+      # (see this file's TRIVY_IGNORE_UNFIXED env and the Grype step's
+      # only-fixed input), so every finding counted here already has a
+      # fix available -- satisfies "a critical/high CVE with an available
+      # fix" without needing to parse fix-version text out of either
+      # tool's SARIF output.
+      - name: Enforce image security gate before push
+        env:
+          SECURITY_THRESHOLD_CRITICAL: ${{ vars.SECURITY_THRESHOLD_CRITICAL || '0' }}
+          SECURITY_THRESHOLD_HIGH: ${{ vars.SECURITY_THRESHOLD_HIGH || '0' }}
+        run: |
+          set -euo pipefail
+          crit=$(( $(jq '(.summary.critical // 0)' trivyimg-findings.json) + $(jq '(.summary.critical // 0)' grype-findings.json) ))
+          high=$(( $(jq '(.summary.high // 0)' trivyimg-findings.json) + $(jq '(.summary.high // 0)' grype-findings.json) ))
+          echo "Trivy (image) + Grype for ${{ matrix.service }}: $crit critical, $high high (fix-available findings only)."
+          if [ "$crit" -gt "$SECURITY_THRESHOLD_CRITICAL" ] || [ "$high" -gt "$SECURITY_THRESHOLD_HIGH" ]; then
+            echo "::error::${{ matrix.service }}'s image has $crit critical / $high high severity finding(s) with an available fix -- refusing to push or sign. See the Trivy (image)/Grype HTML reports for this service above."
+            exit 1
+          fi
+
+      # Build/push uses a dedicated build role, separate from the deploy role
+      # reusable-ecs-deploy.yml uses (vars.AWS_ROLE_ARN) -- least-privilege:
+      # this role only needs ECR push, not ECS/task-def permissions.
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_BUILD_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Verify AWS identity
+        run: |
+            aws sts get-caller-identity
+            
+      - name: Tag and push image to ECR
+        id: push
+        env:
+          # ECR_REGISTRY_<KEY> already holds the full <registry>/<repo> path
+          # (e.g. develop's ECR_REGISTRY_BOOKING = 840080485141.dkr.ecr.us-east-1.amazonaws.com/wandahealth-develop-strata-booking)
+          # -- only a tag needs appending, no separate registry+repo join.
+          ECR_IMAGE_PATH: ${{ vars[format('ECR_REGISTRY_{0}', steps.meta.outputs.var_key)] }}
+          IMAGE_TAG: ${{ steps.meta.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          FULL_IMAGE="${ECR_IMAGE_PATH}:${IMAGE_TAG}"
+
+          docker tag "${{ matrix.service }}:${{ github.sha }}" "$FULL_IMAGE"
+
+          echo "Pushing $FULL_IMAGE"
+          set +e
+          PUSH_OUTPUT=$(docker push "$FULL_IMAGE" 2>&1)
+          PUSH_STATUS=$?
+          set -e
+          echo "$PUSH_OUTPUT"
+          if [ "$PUSH_STATUS" -ne 0 ]; then
+            echo "::error::docker push failed with exit code $PUSH_STATUS"
+            exit "$PUSH_STATUS"
+          fi
+
+          DIGEST=$(echo "$PUSH_OUTPUT" | grep -oE 'digest: sha256:[a-f0-9]{64}' | sed 's/digest: //')
+          if [ -z "$DIGEST" ]; then
+            echo "ERROR: Could not extract image digest from docker push output"
+            exit 1
+          fi
+
+          IMAGE_URI="${ECR_IMAGE_PATH}@${DIGEST}"
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "image_uri=$IMAGE_URI" >> "$GITHUB_OUTPUT"
+          echo "Image pushed: $FULL_IMAGE ($DIGEST)"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless OIDC)
+        run: cosign sign --yes "${{ steps.push.outputs.image_uri }}"

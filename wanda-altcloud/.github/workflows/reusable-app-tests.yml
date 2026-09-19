@@ -1,0 +1,234 @@
+name: Reusable - App Tests
+
+# Called only (workflow_call) -- never triggers on its own. Runs once per
+# service via a matrix built from the caller's `services` input, so a new
+# service opts in by adding a matrix row upstream (in ci.yml's
+# detect-services job), not by touching this file.
+#
+# Quality (ruff/mypy/bandit/pip-audit) and tests (pytest via testcontainers)
+# steps below are currently COMMENTED OUT, not deleted -- pending an
+# approved client Change Request (see the block comment further down for
+# the full reasoning). Only the smoke check against /health is active
+# right now. Once the CR is approved, uncommenting those steps restores
+# the full stage described below.
+#
+# Those steps, when active, are copied verbatim in intent from the
+# client's own strata-cloud/.github/workflows/<service>-quality.yml and
+# <service>-tests.yml -- those files are never actually executed by
+# GitHub (nested .github/, not the repo root -- see ci.yml's header) but
+# they're the real, working spec for what each service's CI is supposed
+# to run, so this reuses their exact commands/module targets rather than
+# guessing. Only the final smoke check against /health is new -- the
+# client's own files stop at pytest.
+#
+# pytest uses testcontainers for an ephemeral Postgres and needs no external
+# database (Ryuk disabled, same as the client's files -- GitHub tears the
+# runner down anyway). The shared strata.core Postgres via `docker compose`
+# is only started later, just for the smoke check, which needs a real
+# running service.
+
+on:
+  workflow_call:
+    inputs:
+      services:
+        description: 'JSON array of service keys to test, e.g. ["booking","connect"]'
+        required: true
+        type: string
+      run_tests:
+        description: "Run quality + unit tests + smoke check at all"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  test:
+    name: ${{ matrix.service }}
+    if: inputs.run_tests && inputs.services != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        service: ${{ fromJSON(inputs.services) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Single source of truth for service key -> folder/port/lint targets,
+      # shared shape with reusable-build-scan-push.yml and
+      # reusable-ecs-deploy.yml. mypy/bandit targets and the connect
+      # service's "app" package name (not strata_connect) are taken directly
+      # from the client's own per-service quality.yml files. Add a new
+      # service here (and in ci.yml's detect-services filters) rather than
+      # inventing a second mapping.
+      - name: Resolve service metadata
+        id: meta
+        run: |
+          case "${{ matrix.service }}" in
+            booking)      DIR="strata.booking";     PORT=8010; MYPY_TARGET="strata_booking scripts";            BANDIT_TARGET="strata_booking scripts"; INSTALL_ARGS='-e ../strata.core -e ../strata.identity -e ".[dev]"' ;;
+            connect)      DIR="strata.connect";      PORT=8004; MYPY_TARGET="app";                               BANDIT_TARGET="app";                    INSTALL_ARGS='-e ../strata.core -e ../strata.identity -e ".[dev]"' ;;
+            engine-auth)  DIR="strata.engine.auth";   PORT=8000; MYPY_TARGET="strata_engine_auth scripts tests"; BANDIT_TARGET="strata_engine_auth";     INSTALL_ARGS='-e ../strata.core -e ../strata.identity -e ".[dev]"' ;;
+            terminology)  DIR="strata.terminology";    PORT=8020; MYPY_TARGET="strata_terminology scripts";      BANDIT_TARGET="strata_terminology scripts"; INSTALL_ARGS='-e ../strata.core -e ../strata.identity -e ".[dev]"' ;;
+            # engine has neither strata.core nor strata.identity as a dependency
+            # (see strata.engine/pyproject.toml) -- plain install, no path deps.
+            engine)       DIR="strata.engine";        PORT=8000; MYPY_TARGET="strata_engine";                    BANDIT_TARGET="strata_engine";          INSTALL_ARGS='-e ".[dev]"' ;;
+            *) echo "::error::Unknown service key '${{ matrix.service }}'"; exit 1 ;;
+          esac
+          echo "dir=$DIR" >> "$GITHUB_OUTPUT"
+          echo "port=$PORT" >> "$GITHUB_OUTPUT"
+          echo "mypy_target=$MYPY_TARGET" >> "$GITHUB_OUTPUT"
+          echo "bandit_target=$BANDIT_TARGET" >> "$GITHUB_OUTPUT"
+          echo "install_args=$INSTALL_ARGS" >> "$GITHUB_OUTPUT"
+
+      # 3.13 to match the Dockerfiles (python:3.13-slim) and every quality/
+      # tests file under strata-cloud/.github/ except booking-*.yml, which
+      # pins 3.14 on its own -- looks like drift in that one client file
+      # rather than the intended version; flagged, not silently copied here.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            strata-cloud/${{ steps.meta.outputs.dir }}/pyproject.toml
+            strata-cloud/strata.core/pyproject.toml
+            strata-cloud/strata.identity/pyproject.toml
+
+      # ---------------------------------------------------------------
+      # DISABLED, NOT DELETED -- pending client Change Request approval.
+      # Ruff/mypy/bandit/pip-audit, and the pytest suite (which itself
+      # exercises Starlette TestClient, anyio, Schemathesis contract
+      # tests, and testcontainers-provisioned Postgres 16) all count as
+      # new requirements not yet covered by an approved CR. Left
+      # commented, not removed, so re-enabling once the CR is approved
+      # is a straight uncomment, not a rebuild. The smoke check below
+      # (starts the real service, polls /health) is unaffected and stays
+      # active -- it isn't part of this toolchain discussion.
+      # ---------------------------------------------------------------
+      # - name: Install dependencies
+      #   working-directory: strata-cloud/${{ steps.meta.outputs.dir }}
+      #   run: pip install ${{ steps.meta.outputs.install_args }}
+      #
+      # - name: Ruff lint
+      #   working-directory: strata-cloud/${{ steps.meta.outputs.dir }}
+      #   run: ruff check --output-format=github .
+      #
+      # - name: Ruff format check
+      #   working-directory: strata-cloud/${{ steps.meta.outputs.dir }}
+      #   run: ruff format --check .
+      #
+      # - name: mypy (strict)
+      #   working-directory: strata-cloud/${{ steps.meta.outputs.dir }}
+      #   run: mypy ${{ steps.meta.outputs.mypy_target }}
+      #
+      # - name: bandit (SAST)
+      #   working-directory: strata-cloud/${{ steps.meta.outputs.dir }}
+      #   run: bandit -q -c pyproject.toml -r ${{ steps.meta.outputs.bandit_target }}
+      #
+      # - name: pip-audit (dependency CVEs)
+      #   working-directory: strata-cloud/${{ steps.meta.outputs.dir }}
+      #   run: pip-audit --skip-editable
+      #
+      # - name: Pull Postgres image
+      #   run: docker pull postgres:16
+      #
+      # - name: Run tests
+      #   working-directory: strata-cloud/${{ steps.meta.outputs.dir }}
+      #   env:
+      #     TESTCONTAINERS_RYUK_DISABLED: "true"
+      #   run: |
+      #     pytest --cov --cov-report=xml --cov-report=html \
+      #            --junitxml=test-results/junit.xml
+      #
+      # - name: Upload JUnit results
+      #   if: always()
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: ${{ matrix.service }}-pytest-junit
+      #     path: strata-cloud/${{ steps.meta.outputs.dir }}/test-results/junit.xml
+      #     if-no-files-found: warn
+      #     retention-days: 30
+      #
+      # - name: Upload coverage (HTML + XML)
+      #   if: always()
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: ${{ matrix.service }}-coverage
+      #     path: |
+      #       strata-cloud/${{ steps.meta.outputs.dir }}/htmlcov/
+      #       strata-cloud/${{ steps.meta.outputs.dir }}/coverage.xml
+      #     if-no-files-found: warn
+      #     retention-days: 30
+
+      # From here on: only needed for the smoke check, which starts a real
+      # instance of the service against a real (if minimal) database --
+      # unlike the pytest suite above, this isn't self-contained.
+      #
+      # `inv` tasks in every strata.* tasks.py shell out to `.venv/bin/<tool>`
+      # by relative path (confirmed by a real run: `inv migrate` failed with
+      # "bash: line 1: .venv/bin/alembic: No such file or directory" against
+      # the plain global install above) -- they assume the local dev setup
+      # documented in strata-cloud/CLAUDE.md (`python3 -m venv .venv &&
+      # .venv/bin/pip install ...`), not a bare `pip install`. The quality/
+      # test steps above call ruff/mypy/pytest/etc. directly, same as the
+      # client's own CI files, so they never hit this; `inv migrate`/
+      # `inv dev` do, so a real .venv is created here to match.
+      - name: Start shared Postgres
+        working-directory: strata-cloud
+        run: docker compose up -d --wait db
+
+      - name: Install & migrate strata.core
+        working-directory: strata-cloud/strata.core
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install -e ".[dev]"
+          cp .env.example .env
+          .venv/bin/inv migrate
+          .venv/bin/inv seed --profile minimal
+
+      - name: Set up service venv (for inv dev)
+        working-directory: strata-cloud/${{ steps.meta.outputs.dir }}
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install --upgrade pip
+          .venv/bin/pip install ${{ steps.meta.outputs.install_args }}
+          cp .env.example .env
+
+      # STRATA_DEV_AUTH_SECRET set explicitly here, not left to .env.example
+      # -- booking/terminology ship a real default in their .env.example
+      # so it happened to work for them via `cp .env.example .env`, but
+      # engine-auth's own .env.example has it commented out (its default
+      # posture is cognito mode, not dev), so with only STRATA_AUTH_MODE
+      # forced to dev here, the identity seam fails closed at startup:
+      # "STRATA_DEV_AUTH_SECRET is not set -- dev-mode verification needs
+      # it" (confirmed by a real run). Same value booking/terminology's
+      # own example files already use, so one dev token remains valid
+      # across all of them.
+      - name: Smoke check against /health (dev-mode auth)
+        env:
+          STRATA_AUTH_MODE: dev
+          STRATA_ENVIRONMENT: local
+          STRATA_DEV_AUTH_SECRET: local-dev-secret-change-me-0123456789abcdef
+          PORT: ${{ steps.meta.outputs.port }}
+        working-directory: strata-cloud/${{ steps.meta.outputs.dir }}
+        run: |
+          .venv/bin/inv dev &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+
+          READY=""
+          for i in $(seq 1 30); do
+            if curl --fail --silent "http://127.0.0.1:${PORT}/health" > /dev/null; then
+              READY=1
+              break
+            fi
+            sleep 2
+          done
+
+          if [ -z "$READY" ]; then
+            echo "::error::${{ matrix.service }} never became healthy on /health within 60s"
+            exit 1
+          fi
+
+          echo "${{ matrix.service }} smoke check passed on port ${PORT}"
