@@ -1,0 +1,16 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfplan
+
+# tfvars are never committed -- real values (incl. resource sizing/naming
+# for now, secrets always via -var flags from GitHub Actions/CI secrets)
+# live in S3 and are fetched at pipeline runtime. Blanket-matched, not just
+# environments/*.tfvars, so one created anywhere in the repo is still caught.
+*.tfvars
+*.tfvars.json
+*.auto.tfvars
+*.auto.tfvars.json
+

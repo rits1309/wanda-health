@@ -1,0 +1,68 @@
+name: Prechecks
+
+# Two guards every environment's pipeline runs before it reaches Terraform: no
+# tfvars file may be committed, and prod may not be destroyed.
+#
+# There is deliberately no actor-permission check here. develop and uat are meant
+# to apply automatically on any push or merge, and prod's gate is GitHub's own
+# required-reviewers rule on the prod Environment (see terraform.yaml's
+# `environment:` setting). A hand-rolled permission check would also have blocked
+# the automatic develop and uat applies whenever the pushing actor was not an org
+# admin.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      action:
+        required: true
+        type: string
+      # Opt-in escape hatch for a deliberate production decommission. The prod
+      # destroy guard below refuses unless this carries the exact confirmation
+      # string, so the intent is recorded in the run's own inputs rather than
+      # inferred from someone having edited this file. Left empty by every
+      # ordinary run, which is why plan and apply are unaffected.
+      confirm_prod_destroy:
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  precheck:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fail if tfvars ever got committed
+        run: |
+          MATCHES=$(git ls-files | grep -E '\.tfvars(\.json)?$' || true)
+          if [ -n "$MATCHES" ]; then
+            echo "::error::tfvars files must never be committed -- real values live in S3, fetched at pipeline runtime:"
+            echo "$MATCHES"
+            exit 1
+          fi
+          echo "No committed tfvars files found."
+
+      # Refuses a production destroy unless the dispatcher typed the exact
+      # confirmation string. The guard is not removable by picking the wrong
+      # dropdown: the intent has to be written into the run's own inputs, where
+      # it stays visible in the run history afterwards.
+      #
+      # Read through env: rather than interpolated into the script, since the
+      # value is caller-supplied free text.
+      - name: Block Prod Destroy
+        env:
+          CONFIRM: ${{ inputs.confirm_prod_destroy }}
+        run: |
+          if [[ "${{ inputs.environment }}" == "prod" && "${{ inputs.action }}" == "destroy" ]]; then
+            if [[ "$CONFIRM" != "destroy-production" ]]; then
+              echo "::error::Destroy is refused for prod. A production teardown must be a deliberate act, not a dispatch with the wrong action selected. To decommission production, re-run with confirm_prod_destroy set to exactly: destroy-production"
+              exit 1
+            fi
+            echo "::warning::Production destroy authorised via confirm_prod_destroy -- every resource in the prod account managed by this codebase is about to be removed."
+          fi
+          echo "Action validation passed: ${{ inputs.action }} on ${{ inputs.environment }}"

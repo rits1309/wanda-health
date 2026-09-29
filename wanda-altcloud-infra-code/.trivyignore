@@ -1,0 +1,7 @@
+# Explicit risk-acceptance, not an oversight -- these are real findings
+# in the existing ALB/security-group Terraform, deliberately not blocking
+# the pipeline while the infra code itself stays untouched. Revisit if the
+# underlying config ever changes, or before promoting to a stricter
+# (e.g. prod) posture.
+AWS-0054 # ALB listener uses plain HTTP
+AWS-0104 # security group egress rules allow 0.0.0.0/0

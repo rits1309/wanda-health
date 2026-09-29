@@ -1,0 +1,234 @@
+name: Terraform Deploy
+
+# The shared plan/apply/destroy job every terraform-<env>.yaml calls. The
+# environment input selects the GitHub Environment, the backend config and the
+# tfvars file, so the three environments differ only in what they pass in.
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      action:
+        required: true
+        type: string
+      tfvars_bucket:
+        required: true
+        type: string
+
+env:
+  TF_VERSION: "1.7.0"
+
+jobs:
+  terraform:
+    name: Terraform ${{ inputs.action }} - ${{ inputs.environment }}
+
+    runs-on: ubuntu-latest
+
+    # destroy binds a dedicated <env>-destroy Environment rather than the plain
+    # <env> one plan and apply use: develop and uat stay frictionless for
+    # plan/apply, while an irreversible whole-environment destroy gets its own
+    # required-reviewer gate. Those Environments need the same AWS_* variables as
+    # their plain counterparts -- GitHub Environments do not inherit variables.
+    environment:
+      name: ${{ inputs.action == 'destroy' && format('{0}-destroy', inputs.environment) || inputs.environment }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify GitHub Environment Configuration
+        env:
+          AWS_ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          # The environment-scoped role this workflow assumes, falling back to
+          # AWS_BUILD_ROLE_ARN for any environment not yet migrated to its own
+          # github-actions-infra-<env> role.
+          AWS_INFRA_ROLE_ARN: ${{ vars.AWS_INFRA_ROLE_ARN || vars.AWS_BUILD_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+
+          echo "Environment: ${{ inputs.environment }}"
+          echo "AWS Account ID: ${AWS_ACCOUNT_ID:-NOT_SET}"
+          echo "AWS Region: ${AWS_REGION:-NOT_SET}"
+          echo "AWS Infra Role ARN: ${AWS_INFRA_ROLE_ARN:-NOT_SET}"
+
+          if [ -z "${AWS_REGION:-}" ]; then
+            echo "ERROR: AWS_REGION is not available"
+            exit 1
+          fi
+
+          if [ -z "${AWS_INFRA_ROLE_ARN:-}" ]; then
+            echo "ERROR: Neither AWS_INFRA_ROLE_ARN nor AWS_BUILD_ROLE_ARN is available"
+            exit 1
+          fi
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_INFRA_ROLE_ARN || vars.AWS_BUILD_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          audience: sts.amazonaws.com
+          role-session-name: GitHubActionsTerraform
+          # Per environment, never a blanket value. A full apply or destroy (RDS,
+          # ECS and CloudFront teardown) can outlast the default 1h OIDC session,
+          # but a hardcoded 4h broke develop outright: develop has no dedicated
+          # infra role and falls back to github-actions-build, whose own
+          # MaxSessionDuration is shorter. Set AWS_ROLE_DURATION_SECONDS as an
+          # Environment Variable after checking that role's maximum. Left unset,
+          # this input falls back to the action's own 1h default.
+          role-duration-seconds: ${{ vars.AWS_ROLE_DURATION_SECONDS }}
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      # A destroy leaves these secrets in Secrets Manager's mandatory recovery
+      # window rather than deleting them outright, so re-creating one under the
+      # same name before the window elapses fails. restore-secret is
+      # non-destructive and a harmless no-op on a secret that is not pending
+      # deletion, so running it before every apply makes this self-healing.
+      #
+      # The secret's existing KMS key can independently be left pending deletion
+      # too, and any update to the secret must decrypt the current value first --
+      # so a stale key is cancelled and re-enabled alongside. Looked up per
+      # secret rather than hardcoded, since the key is specific to whichever
+      # destroy left it behind.
+      - name: Restore any pending-deletion secrets/KMS keys before apply
+        if: inputs.action == 'apply'
+        run: |
+          for name in "wandahealth-${{ inputs.environment }}-db-creds" \
+                      "wandahealth-${{ inputs.environment }}-strata-dev-auth-secret" \
+                      "wandahealth-${{ inputs.environment }}-strata-edge-shared-secret"; do
+            aws secretsmanager restore-secret --secret-id "$name" 2>/dev/null || true
+
+            key_id=$(aws secretsmanager describe-secret --secret-id "$name" \
+              --query KmsKeyId --output text 2>/dev/null || true)
+            if [ -n "$key_id" ] && [ "$key_id" != "None" ]; then
+              aws kms cancel-key-deletion --key-id "$key_id" 2>/dev/null || true
+              aws kms enable-key --key-id "$key_id" 2>/dev/null || true
+            fi
+          done
+
+      - name: Fetch tfvars from S3
+        run: |
+          set -euo pipefail
+
+          mkdir -p environments
+
+          aws s3 cp \
+            "s3://${{ inputs.tfvars_bucket }}/environments/${{ inputs.environment }}.tfvars" \
+            "environments/${{ inputs.environment }}.tfvars"
+
+      # Explicit -backend-config rather than a bare init: backend.tf leaves bucket
+      # and region unset because each environment has its own bucket. The values
+      # live in backends/<env>.hcl, one canonical file per environment, rather
+      # than a command line assembled from workflow inputs.
+      - name: Terraform Init
+        run: |
+          terraform init \
+            -backend-config="backends/${{ inputs.environment }}.hcl"
+
+      - name: Select Workspace
+        run: terraform workspace select -or-create "${{ inputs.environment }}"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      # strata_uat_auth_secret is the name variables.tf declares, shared across
+      # all three workspaces despite the "uat" in it -- a naming clean-up worth
+      # doing separately. The GitHub secret it reads from is a different name in
+      # a different namespace and is untouched.
+      - name: Terraform Plan
+        id: plan
+        env:
+          STRATA_DEV_AUTH_SECRET: ${{ secrets.STRATA_DEV_AUTH_SECRET }}
+          STRATA_EDGE_SHARED_SECRET: ${{ secrets.STRATA_EDGE_SHARED_SECRET }}
+          # A JSON array of emails only, e.g. ["a@x.com","b@y.com"] -- no
+          # passwords. Terraform generates a random temporary password per email
+          # itself (modules/auth/cognito's random_password).
+          COGNITO_INITIAL_USERS_JSON: ${{ secrets.COGNITO_INITIAL_USERS_JSON }}
+        run: |
+          set -euo pipefail
+
+          # TEMPORARY, uat only -- this workflow is shared, so it must not reach
+          # the other environments. uat's task-definition families carried a
+          # stale STRATA_AUTH_MODE value forward from a revision the app repo's
+          # deploy registered (that pipeline patches the image on top of the
+          # latest revision without correcting env vars), so the family's latest
+          # revision stayed wrong even though Terraform's own was correct.
+          # Forcing re-registration makes the correct value the new latest.
+          # Remove once confirmed live.
+          REPLACE_FLAGS=""
+          if [ "${{ inputs.environment }}" = "uat" ]; then
+            REPLACE_FLAGS='-replace=module.ecs.aws_ecs_task_definition.services["strata-booking"] -replace=module.ecs.aws_ecs_task_definition.services["strata-terminology"] -replace=module.ecs.aws_ecs_task_definition.services["strata-engine-auth"]'
+          fi
+
+          terraform plan \
+            -var-file="environments/${{ inputs.environment }}.tfvars" \
+            -var="aws_apn_id=${{ vars.AWS_APN_ID }}" \
+            -var="strata_uat_auth_secret=${STRATA_DEV_AUTH_SECRET}" \
+            -var="strata_edge_shared_secret=${STRATA_EDGE_SHARED_SECRET}" \
+            -var="cognito_initial_user_emails=${COGNITO_INITIAL_USERS_JSON:-[]}" \
+            $REPLACE_FLAGS \
+            -out=tfplan \
+            -no-color 2>&1 | tee plan_output.txt
+
+      - name: Upload Plan Output
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ inputs.environment }}
+          path: |
+            plan_output.txt
+            tfplan
+          retention-days: 30
+
+      - name: Terraform Apply
+        if: inputs.action == 'apply'
+        run: |
+          terraform apply -auto-approve tfplan
+
+      - name: Terraform Destroy
+        if: inputs.action == 'destroy'
+        env:
+          STRATA_DEV_AUTH_SECRET: ${{ secrets.STRATA_DEV_AUTH_SECRET }}
+          STRATA_EDGE_SHARED_SECRET: ${{ secrets.STRATA_EDGE_SHARED_SECRET }}
+        run: |
+          set -euo pipefail
+
+          terraform destroy \
+            -var-file="environments/${{ inputs.environment }}.tfvars" \
+            -var="aws_apn_id=${{ vars.AWS_APN_ID }}" \
+            -var="strata_uat_auth_secret=${STRATA_DEV_AUTH_SECRET}" \
+            -var="strata_edge_shared_secret=${STRATA_EDGE_SHARED_SECRET}" \
+            -auto-approve
+
+      - name: Terraform Output
+        if: inputs.action == 'apply' && success()
+        run: |
+          terraform output -json > terraform_outputs.json || \
+          echo "{}" > terraform_outputs.json
+
+          cat terraform_outputs.json
+
+      - name: Upload Terraform Outputs
+        if: inputs.action == 'apply' && success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-outputs-${{ inputs.environment }}
+          path: terraform_outputs.json
+          retention-days: 30

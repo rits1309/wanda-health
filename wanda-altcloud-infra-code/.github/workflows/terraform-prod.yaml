@@ -1,0 +1,85 @@
+name: Infra Pipeline (Terraform) - Production
+
+# Production's infra pipeline. Manual dispatch only -- no push or pull_request
+# trigger exists, so production infra changes are always deliberate, mirroring
+# the application repos' manual prod deploys.
+#
+# Approval is not a job in this file: it is the prod GitHub Environment's required
+# reviewers, which GitHub enforces on terraform.yaml's `environment: prod` job by
+# pausing it until a reviewer approves. Add them under Settings -> Environments ->
+# prod -- who may approve production infra changes is the team's call, not
+# something to default here.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action to perform"
+        required: true
+        type: choice
+        options: [plan, apply, destroy]
+      run_gitleaks:
+        description: "Run Gitleaks (secret detection)"
+        required: false
+        type: boolean
+        default: true
+      run_checkov:
+        description: "Run Checkov (IaC misconfiguration)"
+        required: false
+        type: boolean
+        default: true
+      run_trivy:
+        description: "Run Trivy (config vulnerability scan)"
+        required: false
+        type: boolean
+        default: true
+      # Production destroy is refused unless this reads exactly
+      # "destroy-production" (see pre_check.yaml). Typing it is the deliberate
+      # act that authorises a decommission, and it is recorded in the run's
+      # inputs. Ignored entirely by plan and apply.
+      confirm_prod_destroy:
+        description: "Type destroy-production to permit action: destroy. Ignored for plan and apply."
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  id-token: write
+  contents: read
+  # See terraform-develop.yaml's permissions block -- same reasoning. Never
+  # exercised here, since this file has no pull_request trigger; kept for
+  # consistency in case that changes.
+  pull-requests: write
+
+jobs:
+  precheck:
+    uses: ./.github/workflows/pre_check.yaml
+    with:
+      environment: prod
+      action: ${{ inputs.action }}
+      confirm_prod_destroy: ${{ inputs.confirm_prod_destroy }}
+    secrets: inherit
+
+  security:
+    needs: precheck
+    uses: ./.github/workflows/security_scan.yaml
+    with:
+      run_gitleaks: ${{ inputs.run_gitleaks }}
+      run_checkov: ${{ inputs.run_checkov }}
+      run_trivy: ${{ inputs.run_trivy }}
+    secrets: inherit
+
+  terraform:
+    needs: security
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/terraform.yaml
+    with:
+      environment: prod
+      action: ${{ inputs.action }}
+      # prod's own bucket, in prod's account. Not wanda-terraform-state, which
+      # exists only in develop's account -- reaching for it here fails with a 403
+      # on HeadObject.
+      tfvars_bucket: wanda-health-terraform-prod-state
+    secrets: inherit

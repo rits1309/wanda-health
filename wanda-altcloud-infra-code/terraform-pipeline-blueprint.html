@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Terraform Pipeline Blueprint</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* Same token system as strata-pipeline-blueprint.html (wanda-altcloud) --
+     this is its companion document, deliberately matched so the two read
+     as one series rather than two one-off pages. */
+  :root {
+    --ink: #12161c;
+    --paper: #f5f6f8;
+    --surface: #ffffff;
+    --surface-2: #eef1f3;
+    --border: #dae0e4;
+    --slate: #5b6572;
+    --slate-soft: #838d99;
+    --accent: #1e6f63;
+    --accent-strong: #14524a;
+    --accent-soft: #e3f0ec;
+    --signal: #b3261e;
+    --signal-soft: #fbe9e8;
+    --ok: #2f7a3d;
+    --ok-soft: #e6f2e8;
+    --env-dev: #3e6fa8;
+    --env-dev-soft: #e7eef7;
+    --env-uat: #7a5ea8;
+    --env-uat-soft: #efe9f7;
+    --env-prod: #8a3b63;
+    --env-prod-soft: #f6e9ef;
+    --code-bg: #10141a;
+    --code-fg: #d7dce2;
+    --code-comment: #7d8894;
+    --code-accent: #7fd7c4;
+    --shadow: 0 1px 2px rgba(18,22,28,0.04), 0 8px 24px -12px rgba(18,22,28,0.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ink: #e7e9ec;
+      --paper: #0e1116;
+      --surface: #171b22;
+      --surface-2: #1d222a;
+      --border: #2a3038;
+      --slate: #8a93a0;
+      --slate-soft: #6b7480;
+      --accent: #4fb6a5;
+      --accent-strong: #8fd9cc;
+      --accent-soft: #14332e;
+      --signal: #e5675f;
+      --signal-soft: #3a1c1c;
+      --ok: #6bbd7a;
+      --ok-soft: #163420;
+      --env-dev: #6e9fd8;
+      --env-dev-soft: #17263a;
+      --env-uat: #a98fd8;
+      --env-uat-soft: #241d3a;
+      --env-prod: #c77a9b;
+      --env-prod-soft: #331e28;
+      --code-bg: #0a0d12;
+      --code-fg: #d7dce2;
+      --code-comment: #6b7480;
+      --code-accent: #7fd7c4;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -12px rgba(0,0,0,0.5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --ink: #e7e9ec;
+    --paper: #0e1116;
+    --surface: #171b22;
+    --surface-2: #1d222a;
+    --border: #2a3038;
+    --slate: #8a93a0;
+    --slate-soft: #6b7480;
+    --accent: #4fb6a5;
+    --accent-strong: #8fd9cc;
+    --accent-soft: #14332e;
+    --signal: #e5675f;
+    --signal-soft: #3a1c1c;
+    --ok: #6bbd7a;
+    --ok-soft: #163420;
+    --env-dev: #6e9fd8;
+    --env-dev-soft: #17263a;
+    --env-uat: #a98fd8;
+    --env-uat-soft: #241d3a;
+    --env-prod: #c77a9b;
+    --env-prod-soft: #331e28;
+    --code-bg: #0a0d12;
+    --code-fg: #d7dce2;
+    --code-comment: #6b7480;
+    --code-accent: #7fd7c4;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px -12px rgba(0,0,0,0.5);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3 {
+    font-family: "Big Shoulders", "Arial Narrow", sans-serif;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.01em;
+    text-wrap: balance;
+    color: var(--ink);
+    margin: 0;
+  }
+  code, pre, .mono { font-family: "IBM Plex Mono", ui-monospace, Consolas, monospace; }
+
+  a { color: var(--accent-strong); }
+  a:focus-visible, button:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .wrap { max-width: 900px; margin: 0 auto; padding: 64px 24px 96px; }
+  .wide { max-width: 1120px; }
+
+  header.hero {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding-bottom: 40px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 48px;
+  }
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent-strong);
+  }
+  h1 { font-size: clamp(34px, 5.2vw, 52px); line-height: 1.02; }
+  .dek {
+    font-size: 18px;
+    color: var(--slate);
+    max-width: 64ch;
+    margin-top: 4px;
+  }
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 18px;
+    list-style: none;
+    padding: 0;
+  }
+  .facts li {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 13px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 10px;
+    color: var(--slate);
+  }
+  .facts b { color: var(--ink); font-weight: 600; }
+
+  section { margin-bottom: 56px; }
+  section > h2 {
+    font-size: 26px;
+    margin-bottom: 6px;
+  }
+  .section-note {
+    color: var(--slate);
+    font-size: 15px;
+    max-width: 68ch;
+    margin-bottom: 24px;
+  }
+
+  .callout {
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--ok);
+    background: var(--ok-soft);
+    border-radius: 8px;
+    padding: 18px 20px;
+    margin-bottom: 48px;
+  }
+  .callout .callout-label {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ok);
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .callout p { margin: 0 0 8px; }
+  .callout p:last-child { margin-bottom: 0; }
+  .callout code { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px; font-size: 0.9em; }
+
+  figure { margin: 0; }
+  .diagram-frame {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: var(--shadow);
+    overflow-x: auto;
+  }
+  .diagram-frame svg { display: block; width: 100%; height: auto; min-width: 820px; }
+  figcaption {
+    margin-top: 12px;
+    font-size: 14px;
+    color: var(--slate);
+    max-width: 76ch;
+  }
+  .legend-line {
+    margin-top: 8px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12.5px;
+    color: var(--slate-soft);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14.5px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  caption { text-align: left; caption-side: top; }
+  thead th {
+    text-align: left;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--slate);
+    background: var(--surface-2);
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  tbody td {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.file { font-family: "IBM Plex Mono", monospace; font-size: 13px; color: var(--accent-strong); white-space: nowrap; }
+  td .sub { display: block; color: var(--slate); font-size: 13px; margin-top: 2px; }
+  .table-wrap { overflow-x: auto; border-radius: 10px; }
+
+  .tree {
+    background: var(--code-bg);
+    color: var(--code-fg);
+    border-radius: 10px;
+    padding: 22px 24px;
+    font-size: 13.5px;
+    line-height: 1.75;
+    overflow-x: auto;
+    box-shadow: var(--shadow);
+  }
+  .tree .c { color: var(--code-comment); }
+  .tree .hl { color: var(--code-accent); }
+
+  .guardrails {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 16px;
+  }
+  .g-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .g-card h3 {
+    font-size: 16px;
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 600;
+    font-family: "IBM Plex Sans", sans-serif;
+    color: var(--ink);
+    margin-bottom: 6px;
+  }
+  .g-card p { margin: 0; color: var(--slate); font-size: 14.5px; }
+
+  .chip {
+    display: inline-block;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 2px 8px;
+    border-radius: 999px;
+  }
+  .chip.dev { background: var(--env-dev-soft); color: var(--env-dev); }
+  .chip.uat { background: var(--env-uat-soft); color: var(--env-uat); }
+  .chip.prod { background: var(--env-prod-soft); color: var(--env-prod); }
+  .chip.ok { background: var(--ok-soft); color: var(--ok); }
+
+  .found {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .found-item {
+    display: grid;
+    grid-template-columns: 26px 1fr;
+    gap: 12px;
+    align-items: start;
+  }
+  .found-mark {
+    width: 26px;
+    height: 26px;
+    border-radius: 999px;
+    background: var(--ok-soft);
+    color: var(--ok);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 13px;
+    font-weight: 600;
+    margin-top: 2px;
+  }
+  .found-body b { font-weight: 600; }
+  .found-body p { margin: 2px 0 0; color: var(--slate); font-size: 14.5px; }
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding-top: 24px;
+    color: var(--slate);
+    font-size: 14.5px;
+  }
+  footer p { max-width: 68ch; }
+</style>
+</head>
+<body>
+
+<div class="wrap wide">
+
+  <header class="hero">
+    <div class="eyebrow">DevSecOps Architecture — Strata.Cloud Infrastructure</div>
+    <h1>Terraform Pipeline Blueprint</h1>
+    <p class="dek">The infra companion to the application pipeline: one branch-driven Terraform run per environment, gated by the same gitleaks-before-Checkov-before-plan discipline, with production locked to a human-approved manual apply and nothing else.</p>
+    <ul class="facts">
+      <li>root: <b>wanda-altcloud-infra-code/.github/</b></li>
+      <li>environments: <b class="chip dev">develop</b> <b class="chip uat">uat</b> <b class="chip prod">prod</b></li>
+      <li>workspace: <b>= branch name</b></li>
+      <li>state: <b>S3</b>, workspace-keyed</li>
+      <li>modules: <b>14</b>, one AWS surface each</li>
+    </ul>
+  </header>
+
+  <div class="callout">
+    <div class="callout-label">Status — verified by a real dry run, not a design proposal</div>
+    <p>This pipeline is committed on <code>feature/infra-terraform</code> and was proven end to end against real AWS: PR #7 into <code>develop</code> ran <code>resolve → precheck → security-scan → terraform plan</code> to a clean pass, OIDC credentials and all. The plan itself reported <code>134 to add, 0 to change, 0 to destroy</code> — the <code>develop</code> workspace has no prior state, so this is a fresh build, not an import.</p>
+    <p>Nothing has been applied yet. The diagrams and tables below describe what the committed files actually do today, not a future intent.</p>
+  </div>
+
+  <section>
+    <h2>How a branch becomes infrastructure</h2>
+    <p class="section-note">Every environment gets its own file — <code class="mono">terraform-develop.yaml</code>, <code class="mono">terraform-uat.yaml</code>, <code class="mono">terraform-prod.yaml</code> — none of them offer an environment dropdown, so a manual run can never accidentally target the wrong one. A pull request runs the chain up to <code class="mono">plan</code> only, for review; a push (a PR landing) runs the same chain through <code class="mono">apply</code>, with no approval gate on develop or uat. Production's file has no push or pull_request trigger at all — reachable only by hand, one gate standing between a click and real infrastructure.</p>
+
+    <figure>
+      <div class="diagram-frame">
+        <svg viewBox="0 0 1340 620" role="img" aria-label="Pipeline flow: a local pre-commit gitleaks hook, then a pull request or push to develop triggers terraform-develop.yaml, and the same for uat via terraform-uat.yaml. A resolve job reads the action from the trigger, then precheck and a security scan (gitleaks, checkov, trivy) both gate a terraform job that runs init, fmt, validate and plan, applying only on a push event, landing in the develop or uat AWS environment with no approval needed. A separate lane has no automatic trigger at all -- only manual workflow_dispatch reaches terraform-prod.yaml, which runs the same precheck, security scan and terraform steps but waits on the prod GitHub Environment's required reviewers before an apply can proceed.">
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor" />
+            </marker>
+            <marker id="arrow-accent" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" class="accent-fill" />
+            </marker>
+            <marker id="arrow-signal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" class="signal-fill" />
+            </marker>
+          </defs>
+
+          <style>
+            svg { color: var(--ink); }
+            .tests-box { fill: var(--surface-2); stroke: var(--slate); stroke-width: 1.4; color: var(--ink); }
+            .accent-box { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; color: var(--accent-strong); }
+            .accent-fill { fill: var(--accent); }
+            .env-dev-box { fill: var(--env-dev-soft); stroke: var(--env-dev); stroke-width: 1.4; color: var(--env-dev); }
+            .env-uat-box { fill: var(--env-uat-soft); stroke: var(--env-uat); stroke-width: 1.4; color: var(--env-uat); }
+            .env-prod-box { fill: var(--env-prod-soft); stroke: var(--env-prod); stroke-width: 1.4; color: var(--env-prod); }
+            .signal-box { fill: var(--signal-soft); stroke: var(--signal); stroke-width: 1.6; color: var(--signal); }
+            .signal-line { stroke: var(--signal); stroke-width: 1.8; }
+            .signal-fill { fill: var(--signal); }
+          </style>
+
+          <!-- ===== spine: pre-commit -> push/PR -> terraform-develop.yaml / terraform-uat.yaml ===== -->
+          <g font-family="IBM Plex Mono, monospace" font-size="12.5">
+            <rect x="20" y="65" width="150" height="50" rx="8" fill="none" stroke="currentColor" opacity="0.55"/>
+            <text x="95" y="86" text-anchor="middle">pre-commit</text>
+            <text x="95" y="102" text-anchor="middle" opacity="0.6" font-size="11">gitleaks · local</text>
+
+            <line x1="170" y1="90" x2="196" y2="90" stroke="currentColor" opacity="0.55" marker-end="url(#arrow)"/>
+
+            <rect x="200" y="65" width="150" height="50" rx="8" fill="none" stroke="currentColor" opacity="0.55"/>
+            <text x="275" y="86" text-anchor="middle">push / PR</text>
+            <text x="275" y="102" text-anchor="middle" opacity="0.6" font-size="11">develop → its file · uat → its file</text>
+
+            <line x1="350" y1="90" x2="378" y2="90" stroke="currentColor" opacity="0.55" marker-end="url(#arrow)"/>
+
+            <rect x="382" y="65" width="120" height="50" rx="8" fill="none" stroke="currentColor" opacity="0.8"/>
+            <text x="442" y="86" text-anchor="middle" font-weight="600">resolve</text>
+            <text x="442" y="102" text-anchor="middle" opacity="0.6" font-size="11">action from event</text>
+
+            <line x1="502" y1="90" x2="530" y2="90" stroke="currentColor" opacity="0.55" marker-end="url(#arrow)"/>
+
+            <rect x="534" y="65" width="130" height="50" rx="8" class="tests-box"/>
+            <text x="599" y="86" text-anchor="middle" font-weight="600">precheck</text>
+            <text x="599" y="102" text-anchor="middle" opacity="0.7" font-size="11">block prod destroy</text>
+
+            <line x1="664" y1="90" x2="692" y2="90" stroke="currentColor" opacity="0.55" marker-end="url(#arrow)"/>
+
+            <rect x="696" y="55" width="230" height="70" rx="8" class="accent-box"/>
+            <text x="811" y="80" text-anchor="middle" font-weight="600">security-scan</text>
+            <text x="811" y="98" text-anchor="middle" opacity="0.75" font-size="11">gitleaks · checkov · trivy config</text>
+            <text x="811" y="114" text-anchor="middle" opacity="0.6" font-size="10">soft-fail, report always uploaded</text>
+
+            <line x1="926" y1="90" x2="954" y2="90" stroke="currentColor" opacity="0.55" marker-end="url(#arrow)"/>
+
+            <!-- terraform box -->
+            <rect x="958" y="30" width="270" height="130" rx="10" fill="none" stroke="currentColor" stroke-width="1.6"/>
+            <text x="1093" y="54" text-anchor="middle" font-weight="700">terraform.yaml</text>
+            <text x="1093" y="74" text-anchor="middle" font-size="11" opacity="0.75">init · fmt · validate · plan</text>
+            <line x1="988" y1="86" x2="1198" y2="86" stroke="currentColor" opacity="0.3"/>
+            <text x="1093" y="106" text-anchor="middle" font-size="11" opacity="0.85">apply — push events only</text>
+            <text x="1093" y="124" text-anchor="middle" font-size="10" opacity="0.6">workspace = branch name</text>
+            <text x="1093" y="142" text-anchor="middle" font-size="10" opacity="0.6">no approval gate here</text>
+          </g>
+
+          <!-- ===== fan-out to environments ===== -->
+          <g font-family="IBM Plex Mono, monospace" font-size="12.5">
+            <path d="M1024,160 C 900,220 640,220 380,300" fill="none" stroke="currentColor" opacity="0.45" stroke-width="1.3" marker-end="url(#arrow)"/>
+            <text x="720" y="240" text-anchor="middle" font-size="10.5" opacity="0.6">workspace: develop</text>
+            <rect x="270" y="302" width="220" height="60" rx="8" class="env-dev-box"/>
+            <text x="380" y="327" text-anchor="middle" font-weight="600">AWS · Terraform-managed</text>
+            <text x="380" y="345" text-anchor="middle" font-size="11">develop</text>
+
+            <path d="M1093,160 C 1093,220 1093,240 1093,300" fill="none" stroke="currentColor" opacity="0.45" stroke-width="1.3" marker-end="url(#arrow)"/>
+            <text x="1093" y="240" text-anchor="middle" font-size="10.5" opacity="0.6">workspace: uat</text>
+            <rect x="983" y="302" width="220" height="60" rx="8" class="env-uat-box"/>
+            <text x="1093" y="327" text-anchor="middle" font-weight="600">AWS · Terraform-managed</text>
+            <text x="1093" y="345" text-anchor="middle" font-size="11">uat</text>
+          </g>
+
+          <!-- ===== production lane, isolated ===== -->
+          <g font-family="IBM Plex Mono, monospace" font-size="12.5">
+            <line x1="200" y1="450" x2="1128" y2="450" stroke="currentColor" opacity="0.15" stroke-dasharray="2 6"/>
+            <text x="200" y="440" font-size="10.5" opacity="0.55">no push · no pull_request trigger reaches this lane</text>
+
+            <rect x="200" y="465" width="180" height="50" rx="8" fill="none" stroke="currentColor" opacity="0.55"/>
+            <text x="290" y="486" text-anchor="middle">workflow_dispatch</text>
+            <text x="290" y="502" text-anchor="middle" opacity="0.6" font-size="11">by hand only</text>
+
+            <line x1="380" y1="490" x2="408" y2="490" stroke="currentColor" opacity="0.55" marker-end="url(#arrow)"/>
+
+            <rect x="412" y="465" width="240" height="50" rx="8" fill="none" stroke="currentColor" opacity="0.8"/>
+            <text x="532" y="486" text-anchor="middle" font-weight="600">terraform-prod.yaml</text>
+            <text x="532" y="502" text-anchor="middle" opacity="0.6" font-size="11">precheck → security-scan → plan</text>
+
+            <line x1="652" y1="490" x2="680" y2="490" stroke="currentColor" opacity="0.55" marker-end="url(#arrow)"/>
+
+            <polygon points="770,465 850,490 770,515 690,490" class="signal-box"/>
+            <text x="770" y="486" text-anchor="middle" font-size="11" font-weight="600">required</text>
+            <text x="770" y="500" text-anchor="middle" font-size="11" font-weight="600">reviewers</text>
+
+            <line x1="850" y1="490" x2="878" y2="490" class="signal-line" marker-end="url(#arrow-signal)"/>
+
+            <rect x="882" y="465" width="120" height="50" rx="8" fill="none" stroke="currentColor" opacity="0.55"/>
+            <text x="942" y="486" text-anchor="middle">apply</text>
+            <text x="942" y="502" text-anchor="middle" opacity="0.6" font-size="11">or destroy</text>
+
+            <line x1="1002" y1="490" x2="1030" y2="490" stroke="currentColor" opacity="0.55" marker-end="url(#arrow)"/>
+
+            <rect x="1034" y="460" width="220" height="60" rx="8" class="env-prod-box"/>
+            <text x="1144" y="485" text-anchor="middle" font-weight="600">AWS · Terraform-managed</text>
+            <text x="1144" y="503" text-anchor="middle" font-size="11">prod</text>
+          </g>
+        </svg>
+      </div>
+      <figcaption>The develop/uat lane and the prod lane share no trigger surface at all — that's deliberate, not a shortcut. A push to <code class="mono">prod</code> doesn't exist as a concept in this pipeline; the only door in is a person choosing <em>Run workflow</em> and a reviewer approving what they see.</figcaption>
+      <div class="legend-line">Both lanes call the same three reusable files (<code>pre_check.yaml</code>, <code>security_scan.yaml</code>, <code>terraform.yaml</code>) — the difference is entirely in what can reach them, not what they do once reached.</div>
+    </figure>
+  </section>
+
+  <section>
+    <h2>What the dry run actually found</h2>
+    <p class="section-note">Two real defects surfaced by running the pipeline for real, not by reading the YAML — the kind of thing a plan-only PR is for.</p>
+    <div class="found">
+      <div class="found-item">
+        <div class="found-mark">✓</div>
+        <div class="found-body">
+          <b>Trivy's tag needed a <code class="mono">v</code> prefix.</b>
+          <p><code class="mono">aquasecurity/trivy-action@0.28.0</code> doesn't resolve — the repo's tags are <code class="mono">v0.28.0</code>. First run failed at security-scan with "unable to find version"; repinned to <code class="mono">@v0.36.0</code>, reran, passed.</p>
+        </div>
+      </div>
+      <div class="found-item">
+        <div class="found-mark">✓</div>
+        <div class="found-body">
+          <b>A tfvars file had reached git history.</b>
+          <p><code class="mono">environments/dev.tfvars</code> was committed early on, then removed once tfvars moved to S3-at-runtime — but removal doesn't erase history. No secrets were in it, so no rewrite was needed, but <code class="mono">.gitignore</code> only matched one path shape and <code class="mono">*.auto.tfvars</code> was commented out. Broadened the ignore rule and added a precheck step that fails the run outright if any <code class="mono">.tfvars</code> file is ever tracked — a backstop <code class="mono">.gitignore</code> alone can't provide, since <code class="mono">git add -f</code> ignores it.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Trigger matrix</h2>
+    <p class="section-note">Six files. Three are reusable and never trigger on their own; the other three are entry points, one per environment, each carrying its own <code class="mono">workflow_dispatch</code> for manual runs.</p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>File</th><th>Trigger</th><th>Gate</th><th>Does</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="file">terraform-develop.yaml</td>
+            <td>push / pull_request: <code class="mono">develop</code><span class="sub">+ workflow_dispatch</span></td>
+            <td>none</td>
+            <td>Resolves the action from the event, then calls precheck, security-scan and terraform, hardcoded to <code class="mono">develop</code>. PR = plan only; push = apply.</td>
+          </tr>
+          <tr>
+            <td class="file">terraform-uat.yaml</td>
+            <td>push / pull_request: <code class="mono">uat</code><span class="sub">+ workflow_dispatch</span></td>
+            <td>none</td>
+            <td>Same shape as terraform-develop.yaml, hardcoded to <code class="mono">uat</code> instead.</td>
+          </tr>
+          <tr>
+            <td class="file">terraform-prod.yaml</td>
+            <td><span class="sub">workflow_dispatch only — no push, no pull_request</span></td>
+            <td><span class="chip prod">prod</span> required reviewers</td>
+            <td>Same three-stage call, hardcoded to <code class="mono">prod</code>. GitHub pauses the terraform job until a reviewer approves.</td>
+          </tr>
+          <tr>
+            <td class="file">pre_check.yaml</td>
+            <td><span class="sub">called only</span></td>
+            <td><code class="mono">workflow_call</code></td>
+            <td>Fails if any <code class="mono">.tfvars</code> file is tracked in git; blocks <code class="mono">destroy</code> on <code class="mono">prod</code>.</td>
+          </tr>
+          <tr>
+            <td class="file">security_scan.yaml</td>
+            <td><span class="sub">called only</span></td>
+            <td><code class="mono">workflow_call</code></td>
+            <td>Gitleaks (secrets), Checkov (IaC misconfiguration), Trivy config scan. Soft-fail — reports upload either way, findings don't yet hard-block.</td>
+          </tr>
+          <tr>
+            <td class="file">terraform.yaml</td>
+            <td><span class="sub">called only</span></td>
+            <td><code class="mono">workflow_call</code></td>
+            <td>OIDC auth, fetches <code class="mono">environments/&lt;env&gt;.tfvars</code> from S3, <code class="mono">init → fmt → validate → plan</code>, then <code class="mono">apply</code>/<code class="mono">destroy</code> only if the caller asked for it.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>File &amp; folder structure</h2>
+    <p class="section-note">A second copy of these files used to live in a top-level <code class="mono">workflows/</code> folder — a leftover from an earlier pass that GitHub never executed (it only reads <code class="mono">.github/workflows/</code>) and had quietly drifted behind: an unpinned Trivy action, a different tfvars S3 path, no AWS identity check. Deleted; this tree is the only copy now.</p>
+    <div class="tree">
+<span class="c">wanda-altcloud-infra-code/</span>
+├── .pre-commit-config.yaml       <span class="c"># gitleaks, stages: [pre-commit], repo-wide</span>
+├── .gitleaks.toml
+├── tf.ps1                        <span class="c"># local wrapper: pulls tfvars from S3 before plan/apply</span>
+├── main.tf · variables.tf · outputs.tf · locals.tf
+├── modules/                      <span class="c"># 14 modules — networking, security, compute, database, storage, auth</span>
+└── .github/
+    └── workflows/
+        ├── <span class="hl">terraform-develop.yaml</span> <span class="c"># develop — push/PR + workflow_dispatch</span>
+        ├── <span class="hl">terraform-uat.yaml</span>     <span class="c"># uat — push/PR + workflow_dispatch</span>
+        ├── <span class="hl">terraform-prod.yaml</span>    <span class="c"># prod — workflow_dispatch only, required reviewers</span>
+        ├── pre_check.yaml         <span class="c"># tfvars-in-git guard, prod-destroy guard</span>
+        ├── security_scan.yaml     <span class="c"># gitleaks · checkov · trivy config</span>
+        └── terraform.yaml         <span class="c"># OIDC · S3 tfvars · init/fmt/validate/plan/apply</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Guardrails this earns</h2>
+    <div class="guardrails">
+      <div class="g-card">
+        <h3>No dropdown, ever</h3>
+        <p>Each environment has its own file with the workspace hardcoded in — not read from a picker, not inferred from a ref. A manual dispatch on <code class="mono">terraform-develop.yaml</code> structurally cannot touch <code class="mono">uat</code> or <code class="mono">prod</code>.</p>
+      </div>
+      <div class="g-card">
+        <h3>Prod has no accidental door</h3>
+        <p>Every other environment reacts to a push. Production doesn't listen for one at all — <code class="mono">terraform-prod.yaml</code> only exists as a manual dispatch, gated again by required reviewers on top of that.</p>
+      </div>
+      <div class="g-card">
+        <h3>Plan is always a separate, visible step</h3>
+        <p>Even on the unrestricted develop/uat path, apply only fires from a real push — a pull request never does more than show you the plan.</p>
+      </div>
+      <div class="g-card">
+        <h3>Gitleaks runs twice</h3>
+        <p>Once locally before the commit exists at all, once again in CI as a backstop for anyone who skipped or bypassed the hook.</p>
+      </div>
+      <div class="g-card">
+        <h3>tfvars can't reach git, twice over</h3>
+        <p><code class="mono">.gitignore</code> stops the accident; a dedicated precheck step stops the <code class="mono">git add -f</code> that ignores <code class="mono">.gitignore</code>.</p>
+      </div>
+      <div class="g-card">
+        <h3>ECR tags stay immutable without breaking bootstrap</h3>
+        <p>Every task definition previously pointed at <code class="mono">:latest</code> against an immutable-tag registry that would only ever accept it once. A <code class="mono">bootstrap_image_tag</code> variable replaces it — pushed once per repo, then never touched again.</p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <p>Committed on <code class="mono">feature/infra-terraform</code>, proven through <code class="mono">plan</code> via PR #7. The next real step is a first <code class="mono">apply</code> against the empty <code class="mono">develop</code> workspace — everything above already ran against live AWS to get here.</p>
+  </footer>
+
+</div>
+
+</body>
+</html>

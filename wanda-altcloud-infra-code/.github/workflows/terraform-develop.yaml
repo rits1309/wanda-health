@@ -1,0 +1,111 @@
+name: Infra Pipeline (Terraform) - Develop
+
+# develop's infra pipeline. Each environment gets its own file, hardcoded to that
+# environment rather than offering a dropdown, so a manual dispatch can never
+# target the wrong one.
+#
+# A pull request runs a read-only plan for review; a push (the PR landing) runs
+# the same chain through apply, with no approval gate -- develop applies freely.
+# A manual dispatch covers plan, apply and destroy on demand, with each scanner
+# individually toggleable for a lighter run.
+
+on:
+  push:
+    branches: [develop]
+  pull_request:
+    branches: [develop]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action to perform"
+        required: true
+        type: choice
+        options: [plan, apply, destroy]
+      run_gitleaks:
+        description: "Run Gitleaks (secret detection)"
+        required: false
+        type: boolean
+        default: true
+      run_checkov:
+        description: "Run Checkov (IaC misconfiguration)"
+        required: false
+        type: boolean
+        default: true
+      run_trivy:
+        description: "Run Trivy (config vulnerability scan)"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write
+  contents: read
+  # A caller's permissions are the ceiling for every reusable workflow it calls.
+  # security_scan.yaml's report job needs pull-requests: write to post and update
+  # its findings comment; without this line that request is silently capped.
+  pull-requests: write
+
+jobs:
+  # ── Resolve action + scan toggles from whatever triggered this run ─────────
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      action: ${{ steps.resolve.outputs.action }}
+      run_gitleaks: ${{ steps.resolve.outputs.run_gitleaks }}
+      run_checkov: ${{ steps.resolve.outputs.run_checkov }}
+      run_trivy: ${{ steps.resolve.outputs.run_trivy }}
+    steps:
+      - name: Resolve action and scan toggles
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "action=${{ inputs.action }}" >> "$GITHUB_OUTPUT"
+            echo "run_gitleaks=${{ inputs.run_gitleaks }}" >> "$GITHUB_OUTPUT"
+            echo "run_checkov=${{ inputs.run_checkov }}" >> "$GITHUB_OUTPUT"
+            echo "run_trivy=${{ inputs.run_trivy }}" >> "$GITHUB_OUTPUT"
+          else
+            # inputs.* exist only for workflow_dispatch and are null elsewhere,
+            # where GitHub coerces them to false rather than the declared
+            # default. Every real push and PR runs the full scan, set explicitly
+            # here rather than inferred.
+            if [ "${{ github.event_name }}" = "push" ]; then
+              echo "action=apply" >> "$GITHUB_OUTPUT"
+            else
+              echo "action=plan" >> "$GITHUB_OUTPUT"
+            fi
+            echo "run_gitleaks=true" >> "$GITHUB_OUTPUT"
+            echo "run_checkov=true" >> "$GITHUB_OUTPUT"
+            echo "run_trivy=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Prechecks (tfvars-in-git guard, block prod destroy) ─────────────────────
+  precheck:
+    needs: resolve
+    uses: ./.github/workflows/pre_check.yaml
+    with:
+      environment: develop
+      action: ${{ needs.resolve.outputs.action }}
+    secrets: inherit
+
+  # ── SecOps scan (gitleaks, checkov, trivy) ──────────────────────────────────
+  security:
+    needs: [resolve, precheck]
+    uses: ./.github/workflows/security_scan.yaml
+    with:
+      run_gitleaks: ${{ needs.resolve.outputs.run_gitleaks == 'true' }}
+      run_checkov: ${{ needs.resolve.outputs.run_checkov == 'true' }}
+      run_trivy: ${{ needs.resolve.outputs.run_trivy == 'true' }}
+    secrets: inherit
+
+  # ── Terraform init/fmt/validate/plan(/apply) ────────────────────────────────
+  terraform:
+    needs: [resolve, security]
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/terraform.yaml
+    with:
+      environment: develop
+      action: ${{ needs.resolve.outputs.action }}
+      tfvars_bucket: wanda-terraform-state
+    secrets: inherit

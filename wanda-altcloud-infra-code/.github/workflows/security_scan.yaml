@@ -1,0 +1,616 @@
+name: Security Scan Workflow
+
+# The shared security scan every terraform-<env>.yaml calls: Gitleaks, Checkov and
+# Trivy as three independent jobs, plus a report job that runs regardless of their
+# outcome (if: always()), so a real finding always produces a PR comment and a
+# downloadable report rather than a bare red X with no detail.
+#
+# Three jobs rather than one sequential job because Gitleaks needs its own
+# container, which would otherwise have to wrap the actions Checkov and Trivy use
+# internally.
+#
+# The report job deliberately has no job-level `permissions:` block, even though
+# its PR-comment step needs pull-requests: write. Declaring one here produced a
+# reproducible startup_failure with zero jobs created, bisected down to that single
+# block. It inherits pull-requests: write from each caller's top-level permissions
+# instead (see terraform-develop.yaml, terraform-uat.yaml, terraform-prod.yaml).
+#
+# Blocking thresholds, per the DevSecOps spec's Stage 1 gate:
+#   - Gitleaks: any real secret blocks. A leaked credential is never "medium".
+#   - Checkov: hard_fail_on CRITICAL only; everything else runs, reports and shows
+#     in the PR comment without blocking.
+#   - Trivy: CRITICAL only, matching the same narrowing in wanda-altcloud (HIGH is
+#     still scanned and reported, just not blocking). The spec's "CVE with an
+#     available fix" describes Trivy's container-image role, which does not apply
+#     in a Terraform-only repo; here it is severity-gated like Checkov.
+#
+# Checkov severity: without a Bridgecrew/Prisma Cloud API key, Checkov attaches no
+# real severity to most checks -- its JSON leaves severity null (shown as UNKNOWN
+# and uncounted by the aggregate gate) and its SARIF, used only for the HTML
+# report, falls back to a flat "high" for every failed check. Setting the optional
+# BC_API_KEY secret makes both accurate; an empty or unset key behaves exactly as
+# before, so it is safe to leave unconfigured. It does not change annotation colour
+# in the Actions panel: bridgecrewio/checkov-action has no severity-to-annotation
+# mapping (upstream issue #83), so every failed check renders there as an error
+# regardless of real severity. That is cosmetic, and separate from the risk gate.
+
+on:
+  workflow_call:
+    inputs:
+      run_gitleaks:
+        description: "Run Gitleaks (secret detection)"
+        required: false
+        type: boolean
+        default: true
+      run_checkov:
+        description: "Run Checkov (IaC misconfiguration)"
+        required: false
+        type: boolean
+        default: true
+      run_trivy:
+        description: "Run Trivy (IaC config scan)"
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  # ─── Gitleaks (Secret Detection) ─────────────────────────────────────────
+  gitleaks:
+    name: Gitleaks (secret detection)
+    if: inputs.run_gitleaks
+    runs-on: ubuntu-latest
+    # gitleaks/gitleaks-action@v2 requires a paid GITLEAKS_LICENSE secret, and
+    # without it secret scanning here was never actually running. That is a
+    # paywall on the wrapper Action, not the open-source CLI, so this runs the CLI
+    # directly -- the same tool the local pre-commit hook uses.
+    container:
+      image: zricethezav/gitleaks:latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # actions/checkout's own safe.directory fix applies only to its own step and
+      # does not carry to a later step's git invocation inside the same
+      # containerized job. Without this, gitleaks silently scans 0 commits.
+      - name: Mark workspace as a safe git directory
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Create reports directory
+        run: mkdir -p reports/gitleaks
+
+      - name: Gitleaks scan
+        id: scan
+        run: |
+          set +e
+          gitleaks detect --source . --config .gitleaks.toml \
+            --report-format json --report-path reports/gitleaks/report.json --redact
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Gitleaks report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-report
+          path: reports/gitleaks/report.json
+          if-no-files-found: warn
+
+      # A second pass in SARIF purely for the browsable HTML report: `detect`
+      # writes one format per invocation, and the JSON above already feeds the
+      # PR-comment table, so this is a cheap second run against the same checkout
+      # rather than switching that table over to SARIF.
+      - name: Gitleaks scan (SARIF, for the HTML report)
+        if: always()
+        continue-on-error: true
+        run: |
+          gitleaks detect --source . --config .gitleaks.toml \
+            --report-format sarif --report-path reports/gitleaks/report.sarif --redact --exit-code 0
+
+      - name: Upload Gitleaks SARIF
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-sarif
+          path: reports/gitleaks/report.sarif
+          if-no-files-found: warn
+
+      - name: Fail if leaks found
+        if: steps.scan.outputs.exit_code != '0'
+        run: |
+          echo "::error::Gitleaks found leaked secret(s) -- see the gitleaks-report artifact."
+          exit 1
+
+  # The gitleaks container has no python3, so the HTML report is generated in a
+  # separate, uncontainerized job. continue-on-error, because a report-generation
+  # hiccup must never affect the pass/fail gitleaks already decided.
+  gitleaks-report:
+    name: Gitleaks HTML Report
+    needs: gitleaks
+    if: always()
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Gitleaks SARIF
+        uses: actions/download-artifact@v4
+        with:
+          name: gitleaks-sarif
+
+      - name: Generate human-readable Gitleaks report
+        run: |
+          python3 .devsecops/report-template/normalize_sarif.py \
+            --tool Gitleaks --out gitleaks-findings.json report.sarif
+          python3 .devsecops/report-template/render_report.py \
+            --tool Gitleaks --title "Gitleaks Report" --data gitleaks-findings.json \
+            --out gitleaks-report.html
+
+      # An inline ::error:: annotation on the PR diff for every leak, so a
+      # reviewer sees it on the offending line rather than only in the report.
+      #
+      # Deliberately annotates EVERY severity, unlike the Checkov and Trivy
+      # steps. Gitleaks has no severity concept of its own -- build_index.py
+      # special-cases it so any finding at all blocks the run, independent of
+      # thresholds -- so restricting this to critical,high would leave a leak
+      # that normalize_sarif.py's SARIF-level fallback happened to bucket as
+      # low blocking the run with nothing annotated to point at it.
+      #
+      # Never fails this job: the "Fail if leaks found" step in the gitleaks job
+      # already made that call, and report generation stays strictly downstream
+      # of it.
+      - name: Annotate Gitleaks findings
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 .devsecops/report-template/emit_annotations.py \
+            --tool Gitleaks --data gitleaks-findings.json \
+            --blocking-severities critical,high,medium,low,info
+
+      - name: Upload Gitleaks HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-html-report
+          path: gitleaks-report.html
+          if-no-files-found: warn
+
+  # ─── Checkov (IaC Security) ──────────────────────────────────────────────
+  checkov:
+    name: Checkov (IaC misconfiguration)
+    if: inputs.run_checkov
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create reports directory
+        run: mkdir -p reports
+
+      # One format per checkov-action call. Giving it a third format breaks the
+      # invocation outright: it passes a single escaped string to
+      # --output-file-path rather than separate flags, and Checkov then fails
+      # writing JSON at all, taking the already-working report down with it. SARIF
+      # comes from a separate call below instead.
+      #
+      # output_file_path is a literal FILE path for the json format here, but a
+      # DIRECTORY for sarif below -- Checkov's writers are inconsistent between
+      # formats. With a directory-shaped value here, the json writer failed with
+      # IsADirectoryError on every run while soft_fail still reported success, the
+      # upload found no file, and every Checkov finding stayed invisible to the
+      # risk gate and the PR comment.
+      #
+      # api-key: the optional BC_API_KEY secret (see this file's header). Unset is
+      # safe and behaves as before.
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          framework: terraform
+          # json only, not cli,json. The `cli` format renders every failed check
+          # as a red error in the Actions annotations panel, with no severity
+          # mapping (upstream issue #83). The client has accepted these findings,
+          # so they must not surface as console errors; json still feeds the
+          # artifact, the risk gate and the PR comment unchanged.
+          output_format: json
+          output_file_path: reports/checkov.json
+          soft_fail: true
+          hard_fail_on: CRITICAL
+          skip_check: CKV_AWS_144,CKV_AWS_145,CKV_AWS_18,CKV_AWS_91,CKV_AWS_68,CKV_AWS_86,CKV_AWS_174,CKV_AWS_310,CKV_AWS_374,CKV_AWS_226,CKV_AWS_161,CKV_AWS_336,CKV_AWS_382,CKV_AWS_260,CKV_AWS_309,CKV_AWS_2,CKV_AWS_150,CKV_AWS_338,CKV_AWS_158,CKV_AWS_304,CKV_AWS_290,CKV_AWS_355,CKV_AWS_393,CKV2_AWS_5,CKV_AWS_378,CKV2_AWS_61,CKV2_AWS_20,CKV_AWS_300,CKV2_AWS_62,CKV2_AWS_28,CKV2_AWS_57,CKV2_AWS_32,CKV2_AWS_3,CKV_AWS_103,CKV2_AWS_12,CKV2_AWS_42,CKV2_AWS_47
+          api-key: ${{ secrets.BC_API_KEY }}
+
+      - name: Upload Checkov report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-report
+          path: reports/checkov.json
+          if-no-files-found: warn
+
+      # A second, fully separate call -- sarif alone -- purely for the browsable
+      # HTML report. continue-on-error on both steps below, so report generation
+      # can never flip this job's already-decided pass/fail into a failure. Same
+      # optional api-key, for the same reason.
+      - name: Run Checkov (SARIF, for the HTML report)
+        if: always()
+        continue-on-error: true
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: .
+          framework: terraform
+          output_format: sarif
+          output_file_path: reports/checkov-sarif
+          soft_fail: true
+          skip_check: CKV_AWS_144,CKV_AWS_145,CKV_AWS_18,CKV_AWS_91,CKV_AWS_68,CKV_AWS_86,CKV_AWS_174,CKV_AWS_310,CKV_AWS_374,CKV_AWS_226,CKV_AWS_161,CKV_AWS_336,CKV_AWS_382,CKV_AWS_260,CKV_AWS_309,CKV_AWS_2,CKV_AWS_150,CKV_AWS_338,CKV_AWS_158,CKV_AWS_304,CKV_AWS_290,CKV_AWS_355,CKV_AWS_393,CKV2_AWS_5,CKV_AWS_378,CKV2_AWS_61,CKV2_AWS_20,CKV_AWS_300,CKV2_AWS_62,CKV2_AWS_28,CKV2_AWS_57,CKV2_AWS_32,CKV2_AWS_3,CKV_AWS_103,CKV2_AWS_12,CKV2_AWS_42,CKV2_AWS_47
+          api-key: ${{ secrets.BC_API_KEY }}
+
+      - name: Generate human-readable Checkov report
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 .devsecops/report-template/normalize_sarif.py \
+            --tool Checkov --out checkov-findings.json reports/checkov-sarif/*.sarif
+          python3 .devsecops/report-template/render_report.py \
+            --tool Checkov --title "Checkov Report" --data checkov-findings.json \
+            --out checkov-report.html
+
+      # See the Trivy job's identical step. The severities match Checkov's entry
+      # in build_index.py's TOOL_BLOCKING_SEVERITIES.
+      #
+      # Worth knowing when reading these annotations: without BC_API_KEY,
+      # normalize_sarif.py deliberately caps Checkov's SARIF-level fallback at
+      # "low" (Checkov marks every failed check level="error" without a key), so
+      # in that configuration few Checkov findings reach critical or high and few
+      # annotations appear. Setting BC_API_KEY gives Checkov real per-check
+      # severities and this becomes meaningful.
+      - name: Annotate Checkov findings
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 .devsecops/report-template/emit_annotations.py \
+            --tool Checkov --data checkov-findings.json \
+            --blocking-severities critical,high
+
+      - name: Upload Checkov HTML report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-html-report
+          path: checkov-report.html
+          if-no-files-found: warn
+
+  # ─── Trivy (IaC Config Scan) ──────────────────────────────────────────────
+  trivy:
+    name: Trivy (IaC config scan)
+    if: inputs.run_trivy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create reports directory
+        run: mkdir -p reports/trivy
+
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: "."
+          format: json
+          output: reports/trivy/report.json
+          severity: "CRITICAL"
+          exit-code: "1"
+
+      - name: Upload Trivy report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-report
+          path: reports/trivy/report.json
+          if-no-files-found: warn
+
+      # A full-severity, non-blocking pass in SARIF purely for the HTML report:
+      # the JSON scan above is narrowed to CRITICAL, which is the blocking gate,
+      # and on its own would make every non-critical finding invisible to the
+      # report as well.
+      - name: Trivy scan (SARIF, all severities, report only)
+        if: always()
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: "."
+          format: sarif
+          output: reports/trivy/report.sarif
+          exit-code: "0"
+
+      - name: Generate human-readable Trivy report
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 .devsecops/report-template/normalize_sarif.py \
+            --tool "Trivy (config)" --out trivy-findings.json reports/trivy/report.sarif
+          python3 .devsecops/report-template/render_report.py \
+            --tool "Trivy (config)" --title "Trivy Config Report" --data trivy-findings.json \
+            --out trivy-report.html
+
+      # An inline ::error:: annotation on the PR diff for each finding at a
+      # severity this tool blocks on, so a reviewer sees it on the changed line
+      # rather than only in the bundled report. The severities match this tool's
+      # entry in build_index.py's TOOL_BLOCKING_SEVERITIES -- never a second,
+      # separate decision. It never fails the job: an annotation is formatting,
+      # not an exit code, and the gate below makes the pass/fail call.
+      - name: Annotate Trivy findings
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 .devsecops/report-template/emit_annotations.py \
+            --tool "Trivy (config)" --data trivy-findings.json \
+            --blocking-severities critical,high
+
+      - name: Upload Trivy HTML report
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-html-report
+          path: trivy-report.html
+          if-no-files-found: warn
+
+  # ─── Report: findings detail + PR comment ─────────────────────────────────
+  report:
+    name: Security Report
+    needs: [gitleaks, gitleaks-report, checkov, trivy]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      # build_index.py below is a checked-in file, so the repository has to be on
+      # the runner, not just the downloaded artifacts.
+      - uses: actions/checkout@v4
+
+      - name: Download all reports
+        uses: actions/download-artifact@v4
+        with:
+          path: reports
+        continue-on-error: true
+
+      # Reads each HTML report's embedded findings JSON and builds one dashboard
+      # over all of them -- severity totals, a pass/blocked banner, a tile per
+      # check. Values are passed through env: rather than interpolated into the
+      # script body, because github.ref_name is attacker-controllable through a PR
+      # branch name; the direct-interpolation form is a real script-injection
+      # class, flagged by GitHub's own scanning on summit's copy of this step.
+      - name: Build report index page
+        env:
+          SECURITY_THRESHOLD_CRITICAL: ${{ vars.SECURITY_THRESHOLD_CRITICAL }}
+          SECURITY_THRESHOLD_HIGH: ${{ vars.SECURITY_THRESHOLD_HIGH }}
+          SECURITY_THRESHOLD_MEDIUM: ${{ vars.SECURITY_THRESHOLD_MEDIUM }}
+          SECURITY_THRESHOLD_LOW: ${{ vars.SECURITY_THRESHOLD_LOW }}
+          RUN_ID: ${{ github.run_id }}
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          python3 .devsecops/report-template/build_index.py \
+            --reports-dir reports \
+            --run-id "$RUN_ID" \
+            --ref-name "$REF_NAME" \
+            --sha "$SHA" \
+            --generated-at "$(date -u +'%Y-%m-%d %H:%M UTC')" \
+            --out reports/index.html \
+            --risk-output reports/.risk-level \
+            --counts-output reports/.risk-counts.json \
+            ${SECURITY_THRESHOLD_CRITICAL:+--critical-threshold "$SECURITY_THRESHOLD_CRITICAL"} \
+            ${SECURITY_THRESHOLD_HIGH:+--high-threshold "$SECURITY_THRESHOLD_HIGH"} \
+            ${SECURITY_THRESHOLD_MEDIUM:+--medium-threshold "$SECURITY_THRESHOLD_MEDIUM"} \
+            ${SECURITY_THRESHOLD_LOW:+--low-threshold "$SECURITY_THRESHOLD_LOW"}
+
+      - name: Package reports
+        run: |
+          mkdir -p bundle
+          cp -r reports/* bundle/ 2>/dev/null || true
+          cd bundle && zip -r ../security-reports.zip . 2>/dev/null || true
+
+      - name: Upload bundled report
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports-bundle
+          path: security-reports.zip
+          retention-days: 14
+          if-no-files-found: warn
+
+      # Renders the tables from build_index.py's --counts-output, the same way
+      # the application repos' report jobs do. This step used to be ~110 lines of
+      # inline Python re-parsing each tool's native JSON and deciding severity
+      # itself, which made two independent classifiers in one job: the dashboard
+      # said one thing, the gate and PR comment another, and they disagreed the
+      # moment Checkov reported a severity the SARIF path had capped. Sourcing
+      # both from one file removes the second classifier entirely.
+      - name: Render findings tables
+        if: always()
+        run: |
+          if [ ! -f reports/.risk-counts.json ]; then
+            printf '%s\n' "_Severity counts were not produced -- see the report index step above._" > findings.md
+            echo "no counts file; wrote a placeholder findings.md"
+            exit 0
+          fi
+          report_md="$(jq -r '
+            def sevtable:
+              ["| Severity | Found | Limit | Status |", "|---|---|---|---|"]
+              + [ .severities[]
+                  | "| " + .severity + " | " + (.found|tostring) + " | "
+                    + (.allowed|tostring) + " | "
+                    + (if .breach then "❌ BREACH"
+                       elif (.severity == "MEDIUM" or .severity == "LOW") then "reported, does not block"
+                       else "✅ OK" end) + " |" ];
+            def tooltable:
+              if (.by_source|length) == 0 then ["_No scanner reports were found._"]
+              else
+                ["| Tool | Status | Critical | High | Medium | Low |", "|---|---|---|---|---|---|"]
+                + [ .by_source[]
+                    | "| " + .tool + " | " + (if .status == "FAIL" then "❌ FAIL" else "✅ PASS" end)
+                      + " | " + (.critical|tostring) + " | " + (.high|tostring)
+                      + " | " + (.medium|tostring) + " | " + (.low|tostring) + " |" ]
+              end;
+            def findingstable:
+              if (.findings|length) == 0 then ["_No individual findings._"]
+              else
+                ["| Severity | Tool | Rule | Location | Message |", "|---|---|---|---|---|"]
+                + [ .findings[]
+                    | "| " + .severity + " | " + .tool + " | `" + .rule
+                      + "` | `" + .location + "` | " + .message + " |" ]
+                + (if .findings_omitted > 0
+                   then ["", "_" + (.findings_omitted|tostring) + " more finding(s) not shown -- see the report bundle._"]
+                   else [] end)
+              end;
+            (["### Risk level: " + .risk_level, ""]
+             + ["#### By tool", ""] + tooltable
+             + ["", "#### Severity totals", ""] + sevtable
+             + ["", "#### Individual findings", ""] + findingstable)
+            | .[]
+          ' reports/.risk-counts.json)"
+          printf '%s\n' "$report_md" > findings.md
+          echo "$report_md"
+
+      - name: Write job summary
+        # if: always() so a later step failing -- this one, or the gate below --
+        # does not skip the summary.
+        if: always()
+        run: |
+          status() {
+            case "$1" in
+              success) echo "✅ Passed" ;;
+              skipped) echo "⏭️ Skipped" ;;
+              failure) echo "❌ Failed" ;;
+              *) echo "⚠️ $1" ;;
+            esac
+          }
+          {
+            echo "## Security Scan Summary"
+            echo ""
+            echo "| Tool | Purpose | Result |"
+            echo "|------|---------|--------|"
+            echo "| Gitleaks | Secret detection | $(status "${{ needs.gitleaks.result }}") |"
+            echo "| Checkov | IaC misconfiguration | $(status "${{ needs.checkov.result }}") |"
+            echo "| Trivy | IaC config scan | $(status "${{ needs.trivy.result }}") |"
+            echo ""
+            if [ -f findings.md ]; then
+              cat findings.md
+            fi
+            echo ""
+            echo "**Full report:** download the \`security-reports-bundle\` artifact above (Summary tab, bottom of this page), unzip it, and open \`index.html\` for a browsable dashboard."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Runs before the PR comment, not after, and carries an id. The comment step
+      # can otherwise only see the three needs.*.result values, none of which
+      # reflect this check, so a run that failed only here -- a threshold breach
+      # with no single CRITICAL finding to hard-fail Checkov or Trivy -- posted
+      # "All checks passed" on a PR whose actual status was red. if: always() so it
+      # still runs and reports accurately even if bundling above had trouble; the
+      # report, findings.md and job summary are already produced by this point.
+      #
+      # Reads build_index.py's own --risk-output, the same file the dashboard and
+      # the findings tables are built from, so the gate cannot disagree with what
+      # a reviewer sees. Each tool is judged against ITS OWN blocking severities
+      # (see TOOL_BLOCKING_SEVERITIES in build_index.py): Checkov and
+      # Trivy (config) on critical or high, Gitleaks on any leaked secret at all.
+      # Medium and low are reported but never block, matching the application
+      # repos. This is in addition to each tool's own job-level gate
+      # (checkov-action's hard_fail_on, Trivy's exit-code), never a replacement.
+      #
+      # Fails CLOSED: a missing or unreadable risk level fails the gate rather
+      # than passing a scan it could not read. The previous version defaulted to
+      # NONE, which passed silently whenever the file was absent.
+      - name: Enforce risk gate
+        id: enforce_gate
+        if: always()
+        run: |
+          if [ ! -s reports/.risk-level ]; then
+            echo "::error::No risk level was produced (see the report index step above), so this gate fails closed rather than passing a scan it could not read."
+            exit 1
+          fi
+          risk="$(cat reports/.risk-level)"
+          echo "Computed risk level: $risk"
+          case "$risk" in
+            CRITICAL|HIGH|MEDIUM|LOW)
+              echo "::error::Risk level is $risk -- see the By tool table in the PR comment or job summary for which tool and finding breached its own limit."
+              exit 1
+              ;;
+          esac
+
+      - name: Post or update PR report comment
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          GITLEAKS_RESULT: ${{ needs.gitleaks.result }}
+          CHECKOV_RESULT: ${{ needs.checkov.result }}
+          TRIVY_RESULT: ${{ needs.trivy.result }}
+          # Read through steps.<id>.outcome, not needs.*.result: this is a step in
+          # the same job, and none of the three result vars above reflect this
+          # check's own pass/fail.
+          RISK_GATE_OUTCOME: ${{ steps.enforce_gate.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- infra-security-report -->';
+
+            const icon = (r) => {
+              if (r === 'success') return '✅ Passed';
+              if (r === 'skipped') return '⏭️ Skipped';
+              if (r === 'failure') return '❌ Failed';
+              return r ? `⚠️ ${r}` : '⚠️ Unknown';
+            };
+
+            let findings = '';
+            try {
+              findings = fs.readFileSync('findings.md', 'utf8').trim();
+            } catch (e) {
+              core.warning(`Could not read findings.md: ${e.message}`);
+            }
+
+            const anyFailed = ['GITLEAKS_RESULT', 'CHECKOV_RESULT', 'TRIVY_RESULT', 'RISK_GATE_OUTCOME']
+              .some((k) => process.env[k] === 'failure');
+            const overall = anyFailed
+              ? '### ❌ One or more checks failed -- this must be resolved before merge'
+              : '### ✅ All checks passed';
+
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const body = [
+              marker,
+              '## Infra Security Report',
+              '',
+              overall,
+              '',
+              '| Check | Result |',
+              '|---|---|',
+              `| Gitleaks | ${icon(process.env.GITLEAKS_RESULT)} |`,
+              `| Checkov | ${icon(process.env.CHECKOV_RESULT)} |`,
+              `| Trivy | ${icon(process.env.TRIVY_RESULT)} |`,
+              `| Aggregate Risk Gate | ${icon(process.env.RISK_GATE_OUTCOME)} |`,
+              '',
+              findings ? findings + '\n' : '',
+              `[Full run](${runUrl}) -- download the \`security-reports-bundle\` artifact there, unzip it, and open \`index.html\` for a browsable dashboard of every finding.`,
+              '',
+              `_Updated for commit ${context.sha.substring(0, 7)}._`,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

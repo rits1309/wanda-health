@@ -1,0 +1,10 @@
+title = "wanda-altcloud-infra-code GitLeaks Configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Only documented, reviewed false positives belong here."
+paths = [
+  '''\.md$''',
+]

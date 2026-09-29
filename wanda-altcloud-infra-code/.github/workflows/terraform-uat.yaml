@@ -1,0 +1,109 @@
+name: Infra Pipeline (Terraform) - UAT
+
+# UAT's infra pipeline: push to uat applies, a PR against uat plans, and a manual
+# dispatch chooses. Hardcoded to uat -- see terraform-develop.yaml's header for
+# why each environment gets its own file rather than one shared file with a
+# dropdown.
+
+on:
+  push:
+    branches: [uat]
+  pull_request:
+    branches: [uat]
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action to perform"
+        required: true
+        type: choice
+        options: [plan, apply, destroy]
+      run_gitleaks:
+        description: "Run Gitleaks (secret detection)"
+        required: false
+        type: boolean
+        default: true
+      run_checkov:
+        description: "Run Checkov (IaC misconfiguration)"
+        required: false
+        type: boolean
+        default: true
+      run_trivy:
+        description: "Run Trivy (config vulnerability scan)"
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  id-token: write
+  contents: read
+  # See terraform-develop.yaml's permissions block -- same reasoning.
+  pull-requests: write
+
+jobs:
+  # ── Resolve action + scan toggles from whatever triggered this run ─────────
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      action: ${{ steps.resolve.outputs.action }}
+      run_gitleaks: ${{ steps.resolve.outputs.run_gitleaks }}
+      run_checkov: ${{ steps.resolve.outputs.run_checkov }}
+      run_trivy: ${{ steps.resolve.outputs.run_trivy }}
+    steps:
+      - name: Resolve action and scan toggles
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "action=${{ inputs.action }}" >> "$GITHUB_OUTPUT"
+            echo "run_gitleaks=${{ inputs.run_gitleaks }}" >> "$GITHUB_OUTPUT"
+            echo "run_checkov=${{ inputs.run_checkov }}" >> "$GITHUB_OUTPUT"
+            echo "run_trivy=${{ inputs.run_trivy }}" >> "$GITHUB_OUTPUT"
+          else
+            # inputs.* exist only for workflow_dispatch and are null elsewhere,
+            # where GitHub coerces them to false rather than the declared
+            # default. Every real push and PR runs the full scan, set explicitly
+            # here rather than inferred.
+            if [ "${{ github.event_name }}" = "push" ]; then
+              echo "action=apply" >> "$GITHUB_OUTPUT"
+            else
+              echo "action=plan" >> "$GITHUB_OUTPUT"
+            fi
+            echo "run_gitleaks=true" >> "$GITHUB_OUTPUT"
+            echo "run_checkov=true" >> "$GITHUB_OUTPUT"
+            echo "run_trivy=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Prechecks (tfvars-in-git guard, block prod destroy) ─────────────────────
+  precheck:
+    needs: resolve
+    uses: ./.github/workflows/pre_check.yaml
+    with:
+      environment: uat
+      action: ${{ needs.resolve.outputs.action }}
+    secrets: inherit
+
+  # ── SecOps scan (gitleaks, checkov, trivy) ──────────────────────────────────
+  security:
+    needs: [resolve, precheck]
+    uses: ./.github/workflows/security_scan.yaml
+    with:
+      run_gitleaks: ${{ needs.resolve.outputs.run_gitleaks == 'true' }}
+      run_checkov: ${{ needs.resolve.outputs.run_checkov == 'true' }}
+      run_trivy: ${{ needs.resolve.outputs.run_trivy == 'true' }}
+    secrets: inherit
+
+  # ── Terraform init/fmt/validate/plan(/apply) ────────────────────────────────
+  terraform:
+    needs: [resolve, security]
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/terraform.yaml
+    with:
+      environment: uat
+      action: ${{ needs.resolve.outputs.action }}
+      # uat keeps both state and tfvars in its own bucket, in the uat account,
+      # rather than the shared wanda-terraform-state develop and prod use:
+      # cross-account access to that bucket is not set up. backend.tf holds the
+      # state half of the same split.
+      tfvars_bucket: wanda-health-terraform-uat-state
+    secrets: inherit
